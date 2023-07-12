@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "types": ["node"],
+    "declaration": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "experimentalDecorators": true,
+    "module": "commonjs",
+    "target": "ES2022",
+    "lib": ["es6"],
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "paths": {
+      "@*": ["./src/*"]
+    },
+  },
+  "include": [
+    "./src/**/*"
+  ],
+  "exclude": ["node_modules"]
+}
