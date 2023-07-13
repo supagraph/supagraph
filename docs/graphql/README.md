@@ -1,6 +1,6 @@
 # Supagraph
 
-This directory contains documentation explaining the core pieces of `supagraph/dist/graphql` and how to use it.
+This directory contains documentation explaining the core pieces of `supagraph/src/graphql` and how to use it.
 
 ## Getting started
 
@@ -201,7 +201,7 @@ To get started with `supagraph`, follow these steps:
    Start `nextjs` as normal:
 
    ```bash
-   $ yarn dev
+   $ pnpm dev
    ```
 
 ### Can I add authentication and other headers?

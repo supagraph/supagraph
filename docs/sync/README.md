@@ -1,6 +1,6 @@
 # Supagraph
 
-This directory contains documentation explaining the core pieces of `supagraph/dist/sync` and how to use it.
+This directory contains documentation explaining the core pieces of `supagraph/src/sync` and how to use it.
 
 ## Getting started
 
@@ -14,40 +14,42 @@ To get started with `supagraph`, follow these steps:
 
 ## Sync
 
-Syncs are the heart of `supagraph`, we use syncs to handle the processing of an event as we see it happen onchain. At the minute, `supagraph` is configured to be ran periodically in a "catch-up" fashion to reduce the amount of i/o required to keep up to date.
+Syncs are the heart of `supagraph` as an indexer, we use syncs to handle the processing of an `event` as we see it happen onchain.
 
-Some layer2 chains are producing a huge number of blocks and and its getting more and more expensive to obtain a full history in a reasonable time-frame. `Supagraph` offers a few options to cut down the amount of information we need to obtain in order to sync our data-store, but these are wholly dependent on your use-case, we explain more about these in the sections below.
+`Supagraph` is configured to run these syncs periodically in a "catch-up" fashion to allow RPC usage to be both deterministic and configurable.
+
+Some layer2 chains are producing a huge number of blocks and its getting more and more expensive to obtain a full history in a reasonable time-frame, to ease this pain, `supagraph` offers several options to cut down on the amount of data we need to obtain in order to produce our data-store, but these are wholly dependent on the use-case and carry significant trade-offs, we explain more about these options in the sections below.
 
 ### What exactly are we handling?
 
-We're handling EVM events, events are emitted as `logs` when an EVM contract emits an event. The details of `log` message are limited to just the content of the emitted message and a small amount of supplementary information pertaining to the transaction (the block it was emitted in and the transaction responsible for producing it etc...).
+We're handling EVM events, events are emitted as `logs` when an EVM contract emits an event. The details of `log` messages are limited to just the content of the emitted message and a small amount of supplementary information pertaining to the transaction (the block it was emitted in and the transaction responsible for producing it etc...).
 
-If we want to gather more information than just the event `log` content (such as the `tx.from` or the `block.timestamp`) then we need to opt-in to pulling this information (see section on "Syncing").
+If we want to gather more information than just the event `log` content (such as the `tx.from` or the `block.timestamp`) then we need to opt-in to pulling the `tx` and `block` from our RPC provider (see section on ["Syncing"](#syncing)), by opting-in to collecting this data, we're significantly increasing our RPC usage so its always useful to ask yourself if you can get-by with just the log content.
 
 ### What does a handler look like?
 
 A basic handler has the following structure:
 
 ```typescript
-const handler = addSync<{ ...types_for_emitted_log_message }>({
+const handler = addSync<types_for_emitted_log_message>({
   eventName: CONTRACT_EVT,
   address: CONTRACT_ADDRESS,
   provider: CHAINS_PROVIDER,
   eventAbi: CONTRACT_ABI,
-  startBlock: CONTRACT_STARTBLOCK,
+  startBlock: CONTRACT_START_BLOCK,
   onEvent: async (args, { tx, block }) => {
     // Code for handling the sync operation
   }
 );
 ```
 
-Breaking that down, we're supplying a generic type (`types_for_emitted_log_message`) to `addSync<T>()`, this type matches the event signature defined in the `CONTRACT_ABI` for this `CONTRACT_EVT`.
+Breaking that down, we're supplying a generic type (`types_for_emitted_log_message`) to `addSync<T>(...)`, this type matches the event signature defined in the `CONTRACT_ABI` for this `CONTRACT_EVT`.
 
 We then supply a `Sync` object as the only parameter to `addSync()`. The `Sync` object defines where we're going to get the event data from and how we're going to process it.
 
-If this database is fresh then the `Sync` will begin from the provided `CONTRACT_STARTBLOCK`, otherwise we'll pick up where we left off and sync by pulling any new events since the last run.
+If this database is fresh then the `Sync` will begin from the provided `CONTRACT_START_BLOCK`, otherwise we'll pick up where we left off on the last sync and pull any new events that have been emitted since.
 
-Each `log` discovered in a `sync()` will be passed through the `onEvent()` function, this function is supplied the `args` (typed according to the `addSync` generic) parsed from the `log` data along with some `tx` and `block` data. The extent of how much `tx` and `block` data depends on the configuration we feed through the `sync()` method (see section on "Syncing"),
+Each `log` discovered in a `sync()` will be passed through the `onEvent()` handler, this function is supplied the `args` (typed according to the `addSync` generic) parsed from the `log` data along with some `tx` and `block` data. The extent of how much `tx` and `block` data depends on the configuration we feed through the `sync()` method (see section on ["Syncing"](#syncing)), if we want to include the full `tx` and `block` data, then we need to opt-in by feeding the appropriate options (`{ skipBlocks: false, skipTransactions: false, skipOptionalArgs: false }`) when calling `sync(options)`.
 
 ### How can I find the correct information to feed to an `addSync` handler?
 
@@ -169,17 +171,17 @@ Fewer calls of the `sync` method means fewer requests in total, but the number o
 
 ### How does the sync work?
 
-The `sync()` method takes every `Sync` you have constructed with `addSync<T>()` and it creates a set of `Providers` you are using in all of your `Syncs` to establish an appropriate `StartBlock` to use for the `queryFilter` calls we're about to make. If this is the first time we're running `sync()` with a fresh data-store, we will default to the provided `Sync.startBlock`, if we've previously ran a `sync()` then the `StartBlock` will be pulled from the `__META__` table in the form of the `latestBlock` we saw for this `Provider.network.chainId`.
+The `sync()` method takes every `Sync` operation you have constructed with `addSync<T>()` and constructs a set of `Providers` you are using in all of your `Syncs` to establish appropriate `StartBlocks` to use for the `queryFilter` calls we're about to make. If this is the first time we're running `sync()` with a fresh data-store, we will default to the provided `Sync.startBlock`, if we've previously ran a `sync()` then the `StartBlock` will be pulled from the `__META__` table in the form of the `latestBlock` we saw for this `Provider.network.chainId`.
 
-Once we've established where we're going to start our `queryFilter` from, we run it using the `eventAbi` and `eventFn` defined in the `Sync`. Most RPC's will limit the number of `logs` a single `queryFilter` request can return, so `supagraph` will attempt the queries using a `bisect` approach (we'll divide the block-range in two and try again) to eventually pull the full range of events between the `StartBlock` and `latest` block. This initial requesting of `logs` constitutes the `"events"` `Stage` and if we call sync with a `stop` here (`sync({ stop: "events"})`) we would only pull the `logs` and nothing more.
+Once we've established where we're going to start our `queryFilter` from, we run it using the `eventAbi` and `eventFn` defined in the `Sync`. Most RPC's will limit the number of `logs` a single `queryFilter` request can return, so `supagraph` will attempt the queries using a `bisect` approach (we'll divide the block-range in two and try again) to eventually pull the full range of events between the `StartBlock` and the `latest` block. This requesting of `logs` constitutes the `"events"` `Stage` and if we call sync with a `stop` here (`sync({ stop: "events"})`) we would pull the `logs`, temporarily storing them to disk, and end the processing there.
 
-The next steps are `"blocks"` and `"transactions"` - these two are ran sequentially and you can stop between the two (or skip the steps entirely) - but they perform very similar actions. They will request every `block` or `transactionReceipt` for every discovered `log` event we found in the previous step, they will extract the `timestamp` or `from` and add those details to the event data directly, and store the `block`/`transactionReceipt` onto disk so that it may be used in the `Sync.onEvent()` handlers.
+The next steps are `"blocks"` and `"transactions"` - these two are ran sequentially and you can stop between the two (or skip them entirely) - but they perform very similar actions. They will request every `block` or `transactionReceipt` for every discovered `log` event we found in the previous step, they will extract the `timestamp` or `from` and add those details to the event data directly for easy access, and store the full `block`/`transactionReceipt` onto disk so that it can be used in the `Sync.onEvent()` handlers.
 
-Next we `"sort"` the `logs`. As the `logs` are pulled for each handler then combined, these `logs` need to be sorted into a sensible approach order. If we have all of the `blocks` we can use the `block.timestamp` which will give us the most reliable `multi-chain` sort. However if we don't have the `blocks` the best we can do is sort on is `log.blockNumber` and `log.transactionIndex`.
+Next we `"sort"` the `logs`. As the `logs` are pulled for each handler then combined, these `logs` need to be sorted into a sensible approach order. If we collected all of the `blocks` we can use the `block.timestamp` which will give us the most reliable `multi-chain` sort. However if we don't have the `blocks` the best we can do is sort on is `log.blockNumber` and `log.transactionIndex` (this is really only safe to do when indexing a single chain).
 
-The final step is to `"process"` all of the `logs` through the appropriate `Sync.onEvent()` handler. If we have previously ran the sync, everything should be fully cached into the `tmp` directory and we can `start` the `sync()` from `"process"` (`sync({ start: "process"})`).
+The final step is to `"process"` all of the `logs` through the appropriate `Sync.onEvent()` handler. If we have already ran the sync with a `{ stop: "sort" }`, everything will be fully cached in the `tmp` directory and we can `start` the `sync()` from `"process"` (`sync({ start: "process"})`).
 
-After the process has completed and after all new `Entity` data has been `bulk` written to the resolver, we will finally update the pointers to correspond with the true `latestBlock` for each provider. This true `latestBlock` reflects the `blockNumber` of the final `log` in the discovered events array for each `Provider.network.chainId`.
+After the process has completed and after all new `Entity` data has been `bulk` written to the `db`, we will finally update the pointers to correspond with the true `latestBlock` for each provider. This true `latestBlock` reflects the `blockNumber` of the final `log` in the discovered events array for each `Provider.network.chainId`.
 
 ## Support
 

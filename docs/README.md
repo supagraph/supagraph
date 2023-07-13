@@ -12,13 +12,13 @@ To get started with `supagraph`, follow these steps:
    $ pnpm add supagraph
    ```
 
-## GraphQL
-
-- Read the `supagraph/dist/graphql` docs [here](./graphql/README.md)
-
 ## Sync
 
-- Read the `supagraph/dist/sync` docs [here](./sync/README.md)
+- Read the `supagraph/src/sync` docs [here](./sync/README.md)
+
+## GraphQL
+
+- Read the `supagraph/src/graphql` docs [here](./graphql/README.md)
 
 ## Support
 
