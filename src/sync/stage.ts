@@ -56,6 +56,7 @@ export class Stage extends DB {
             // only delete on last entry
             if (
               value === null &&
+              // check that this isnt a null insert from our first read of the db for an empty key
               ((this.db as unknown as { mutable: boolean }).mutable ||
                 (!(this.db as unknown as { mutable: boolean }).mutable &&
                   index > 0 &&
@@ -127,7 +128,7 @@ export class Stage extends DB {
       // nothing has been found in cache, look up from disk
       const value = await this.db.get(key);
       if (this.isCheckpoint) {
-        // since we are in a checkpoint, put this value in cache, so future `get` calls will not look the key up again from disk
+        // since we are in a checkpoint, put this value in cache, so future `get` calls will not look the key up again from disk (this could be null)
         this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(key, [
           value,
         ]);
@@ -152,12 +153,12 @@ export class Stage extends DB {
             currentSet[currentSet.length - 1] as unknown as {
               _chain_id: number;
             }
-          )._chain_id === val._chain_id &&
+          )?._chain_id === val?._chain_id &&
           (
             currentSet[currentSet.length - 1] as unknown as {
               _block_num: number;
             }
-          )._block_num === val._block_num) ||
+          )?._block_num === val?._block_num) ||
         // we can always pop for __meta__ entries (these don't need to be immutable ever)
         key.indexOf("__meta__") !== -1
       ) {
