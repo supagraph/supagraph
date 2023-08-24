@@ -187,7 +187,11 @@ export class Mongo extends DB {
 
       // keep going or start fresh
       collected[ref] = collected[ref] || [];
-      collected[ref].push(val);
+
+      // only collect true values
+      if (val.type === "del" || val?.value) {
+        collected[ref].push(val);
+      }
 
       return collected;
     }, {} as Record<string, typeof vals>);

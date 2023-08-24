@@ -52,13 +52,20 @@ export class Stage extends DB {
       const batchOp: BatchDBOp[] = [];
       keyValueMap.forEach((values, key) => {
         if (key.indexOf("__meta__") === -1) {
-          values.forEach((value) => {
-            if (value === null) {
+          values.forEach((value, index) => {
+            // only delete on last entry
+            if (
+              value === null &&
+              ((this.db as unknown as { mutable: boolean }).mutable ||
+                (!(this.db as unknown as { mutable: boolean }).mutable &&
+                  index > 0 &&
+                  index === values.length - 1))
+            ) {
               batchOp.push({
                 key,
                 type: "del",
               });
-            } else {
+            } else if (value) {
               batchOp.push({
                 key,
                 type: "put",
@@ -66,12 +73,12 @@ export class Stage extends DB {
               });
             }
           });
-        } else if (values[values.length - 1] === null) {
+        } else if (values.length && values[values.length - 1] === null) {
           batchOp.push({
             key,
             type: "del",
           });
-        } else {
+        } else if (values.length && values[values.length - 1]) {
           batchOp.push({
             key,
             type: "put",
@@ -88,12 +95,15 @@ export class Stage extends DB {
         this.checkpoints[this.checkpoints.length - 1].keyValueMap;
       keyValueMap.forEach((value, key) =>
         // combine the current entries with the new entries (if !mutable there will only be 1 entry)
-        currentKeyValueMap.set(key, [
-          ...(!(this.db as unknown as { mutable: boolean }).mutable
-            ? currentKeyValueMap.get(key) || []
-            : []),
-          ...value,
-        ])
+        currentKeyValueMap.set(
+          key,
+          [
+            ...(!(this.db as unknown as { mutable: boolean }).mutable
+              ? currentKeyValueMap.get(key) || []
+              : []),
+            ...value,
+          ].filter((v) => v || v === null)
+        )
       );
     }
 
@@ -131,18 +141,25 @@ export class Stage extends DB {
   // writes a value directly to leveldb or stores it in a checkpoint
   async put(key: string, val: Record<string, unknown>): Promise<boolean> {
     if (this.isCheckpoint) {
+      const currentSet = !(this.db as unknown as { mutable: boolean }).mutable
+        ? this.checkpoints[this.checkpoints.length - 1].keyValueMap.get(key) ||
+          []
+        : [];
+      // drop the last item if it matches current item (set in the same block)
+      if (
+        currentSet.length &&
+        (currentSet[currentSet.length - 1] as unknown as { _chain_id: number })
+          ._chain_id === val._chain_id &&
+        (currentSet[currentSet.length - 1] as unknown as { _block_num: number })
+          ._block_num === val._block_num
+      ) {
+        currentSet.pop();
+      }
       // put value in cache (this ensures we make only one write per key)
       this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(
         // mutable objects should be pushed with an additional key part
         key,
-        [
-          ...(!(this.db as unknown as { mutable: boolean }).mutable
-            ? this.checkpoints[this.checkpoints.length - 1].keyValueMap.get(
-                key
-              ) || []
-            : []),
-          val,
-        ]
+        [...currentSet, val].filter((v) => v || v === null)
       );
       return true;
     }
@@ -153,14 +170,17 @@ export class Stage extends DB {
   async del(key: string): Promise<boolean> {
     if (this.isCheckpoint) {
       // delete the value in the current cache (for mutable sets we never delete but we should insert an empty)
-      this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(key, [
-        ...(!(this.db as unknown as { mutable: boolean }).mutable
-          ? this.checkpoints[this.checkpoints.length - 1].keyValueMap.get(
-              key
-            ) || []
-          : []),
-        null,
-      ]);
+      this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(
+        key,
+        [
+          ...(!(this.db as unknown as { mutable: boolean }).mutable
+            ? this.checkpoints[this.checkpoints.length - 1].keyValueMap.get(
+                key
+              ) || []
+            : []),
+          null,
+        ].filter((v) => v || v === null)
+      );
       return true;
     }
     // delete the value on disk
