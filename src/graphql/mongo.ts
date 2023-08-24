@@ -1050,7 +1050,7 @@ export function createQuery(
   aggregates.push(
     ...([
       // perform the match before the sort and groupBy to limit matches
-      useMatch?.$match
+      mutable && useMatch?.$match
         ? {
             $match: useMatch?.$match,
           }
@@ -1132,6 +1132,12 @@ export function createQuery(
               },
             },
           ]),
+      // perform the match after the sort and groupBy to make sure we're working against the requested set
+      !mutable && useMatch?.$match
+        ? {
+            $match: useMatch?.$match,
+          }
+        : false,
       // for each entity on the query we need to create a join...
       ...Array.from(new Set([...entityFields, ...argFields]))
         // exclude any fields not mentioned in the query
