@@ -168,8 +168,8 @@ The first two options (start and stop) allow us to initiate partial runs and sav
 We're also able to construct our entity collections much quicker if we supply an option set which doesn't collect `tx` or `block` information at all, but there are few things we should be aware of;
 
 - All events from all handlers are sorted by block prior to processing to ensure we approach them in the correct order.
-- If we are collecting blocks from multiple chains and the order that events are processed matters for the resultant `Entity`, we must use `collectBlocks = false` to collect all `blocks` enabling us to sort by `block.timestamp`
-- If we use `collectTxReceipts`, we're unable to say which address the `log` relates to, this is okay in situations like `erc20` tokens, because they emit a `from` address in the `log` data.
+- If we are collecting blocks from multiple chains and the order that events are processed matters for the resultant `Entity`, we must use `collectBlocks = true` to collect all `blocks` enabling us to sort by `block.timestamp`
+- If we don't use `collectTxReceipts`, we're unable to say which address the `log` relates to, this is okay in situations like `erc20` tokens, because they emit a `from` address in the `log` data.
 
 Finally we need to think about how often we call this `sync` method, it would never make sense to call it more frequently than the average block time, but there really is no bound for how infrequently we call it.
 
