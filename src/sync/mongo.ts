@@ -118,7 +118,7 @@ export class Mongo extends DB {
         {
           id,
           // if ids are unique then we can place by update
-          ...(this.mutable
+          ...(this.mutable || ref === "__meta__"
             ? {}
             : {
                 _block_ts: val?._block_ts,
