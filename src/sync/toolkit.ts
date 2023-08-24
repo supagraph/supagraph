@@ -11,8 +11,8 @@ import {
   // @TODO - check support for wss providers
   WebSocketProvider,
 } from "@ethersproject/providers";
-import { BlockWithTransactions } from "@ethersproject/abstract-provider";
 import { getAddress } from "ethers/lib/utils";
+import { BlockWithTransactions } from "@ethersproject/abstract-provider";
 
 // Import tooling to check bloomFilters
 import {

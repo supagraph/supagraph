@@ -51,20 +51,33 @@ export class Stage extends DB {
       // this was the final checkpoint, we should now commit and flush everything to disk
       const batchOp: BatchDBOp[] = [];
       keyValueMap.forEach((values, key) => {
-        values.forEach((value) => {
-          if (value === null) {
-            batchOp.push({
-              key,
-              type: "del",
-            });
-          } else {
-            batchOp.push({
-              key,
-              type: "put",
-              value,
-            });
-          }
-        });
+        if (key.indexOf("__meta__") === -1) {
+          values.forEach((value) => {
+            if (value === null) {
+              batchOp.push({
+                key,
+                type: "del",
+              });
+            } else {
+              batchOp.push({
+                key,
+                type: "put",
+                value,
+              });
+            }
+          });
+        } else if (values[values.length - 1] === null) {
+          batchOp.push({
+            key,
+            type: "del",
+          });
+        } else {
+          batchOp.push({
+            key,
+            type: "put",
+            value: values[values.length - 1],
+          });
+        }
       });
       return this.batch(batchOp);
     }
