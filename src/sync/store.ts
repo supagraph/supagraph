@@ -1,7 +1,4 @@
-/* eslint-disable max-classes-per-file, @typescript-eslint/no-use-before-define */
-
 // Each Entity is store as TypedMap holding TypedMapEntries
-
 import { Block } from "@ethersproject/providers";
 
 import { BigNumber } from "ethers";
@@ -22,10 +19,10 @@ type Engine = {
   chainId?: number;
   block?: Block;
   newDb?: boolean;
+  lastUpdate?: number;
 };
 
 // create a global to store in-memory engine for duration of request
-// eslint-disable-next-line no-multi-assign
 const engine: Engine = ((global as typeof global & { engine: Engine }).engine =
   (global as typeof global & { engine: Engine }).engine || {}); // should we default this to the memory db?
 
@@ -59,8 +56,13 @@ export const setEngine = async ({
     engine.name = name;
     // resolve the raw db and store
     engine.db = await Promise.resolve(db);
-    // wrap the db in a checkpoint staging db
-    engine.stage = new Stage(engine.db);
+    // set the engine against the db
+    if (engine.db) {
+      // wrap the db in a checkpoint staging db
+      engine.stage = new Stage(engine.db);
+      // place the engine against the db for access by ref
+      engine.db.engine = engine as { newDb: boolean };
+    }
   }
 };
 
@@ -69,7 +71,13 @@ export class Entity<T extends { id: string }> extends TypedMap<
   keyof T,
   T[keyof T]
 > {
+  id: string;
+
   ref: string;
+
+  chainId: number;
+
+  block: Block | undefined;
 
   // allow the entity to be fully defined on construct to rebuild prev known entities (entites stored into Store on .save())
   constructor(
@@ -79,9 +87,19 @@ export class Entity<T extends { id: string }> extends TypedMap<
   ) {
     super();
     // record ref for saving to store later
+    this.id = id;
     this.ref = ref;
     // set the entities if and as provided
     if (entries) this.entries = entries;
+
+    // pull the block
+    const block = Store.getBlock();
+    // pull the chainID
+    const chainId = Store.getChainId();
+
+    // update block and chain details when provided
+    this.block = block;
+    this.chainId = chainId || 0;
 
     // place getters and setters directly onto the instance to expose vals (this is the `T &` section of the type)
     [...this.entries, new TypedMapEntry("id", id)].forEach((kv) => {
@@ -106,7 +124,12 @@ export class Entity<T extends { id: string }> extends TypedMap<
 
     // type assertion to add properties of T directly to the instance
     // eslint-disable-next-line no-constructor-return
-    return this as unknown as Entity<T> & T;
+    return this as this & Entity<T> & T;
+  }
+
+  // return a copy of the instance (this will renew the associated block and chain)
+  async copy(newId: boolean = false) {
+    return Store.get<T>(this.ref, this.id, newId);
   }
 
   set<K extends keyof T>(key: K, value: T[K]): void {
@@ -127,25 +150,27 @@ export class Entity<T extends { id: string }> extends TypedMap<
     return super.getEntry(key) as TypedMapEntry<K, T[K]> | null;
   }
 
-  async save(): Promise<Entity<T> & T> {
+  async save(updateBlock = true): Promise<Entity<T> & T> {
     // get our id
     const id = this.getEntry("id" as keyof T)?.value as string;
-    // pull the block
-    const block = Store.getBlock();
-    // pull the chainID
-    const chainId = Store.getChainId();
 
     // this should commit changes (adding them to a batch op to be commited to db later)
     if (id) {
       // update block and chain details when provided
-      if (block) {
+      if (this.block && updateBlock) {
         // adding these regardless of typings - we need them to settle the latest entry from the db
-        this.set("_block_ts" as keyof T, block.timestamp as T[keyof T]);
-        this.set("_block_num" as keyof T, block.number as T[keyof T]);
+        this.set(
+          "_block_ts" as keyof T,
+          +`${Number(this.block?.timestamp).toString(10)}` as T[keyof T]
+        );
+        this.set(
+          "_block_num" as keyof T,
+          +`${Number(this.block?.number).toString(10)}` as T[keyof T]
+        );
       }
       // adding chainId will need to be done on first insert (even if we don't have the block yet)
-      if (chainId) {
-        this.set("_chain_id" as keyof T, chainId as T[keyof T]);
+      if (this.chainId) {
+        this.set("_chain_id" as keyof T, this.chainId as T[keyof T]);
       }
       // replace the current entry with the new one
       await Store.set(
@@ -155,8 +180,18 @@ export class Entity<T extends { id: string }> extends TypedMap<
       );
     }
 
-    // return the new copy of the saved entity
-    return Store.get(this.ref, id);
+    // return a new copy of the saved entity (without fetching from db again)
+    return new Entity<T>(
+      this.ref,
+      id,
+      this.entries.map(
+        (entry) =>
+          new TypedMapEntry<typeof entry.key, typeof entry.value>(
+            entry.key,
+            entry.value
+          )
+      )
+    ) as Entity<T> & T;
   }
 }
 
@@ -167,7 +202,7 @@ export class Store {
     ref: string,
     id: string,
     newId: boolean = false
-  ): Promise<T & Entity<T>> {
+  ) {
     // if we attempt to use this without an engine then prepare one now...
     if (!engine.db)
       await setEngine({
@@ -177,17 +212,17 @@ export class Store {
     // default the entity if missing
     entities[ref] = entities[ref] || {};
     // return the Entity (as a clone or as a new entry (this isnt recorded into state until it is saved later))
-    return (entities[ref][id]?.entries
+    return entities[ref][id]?.entries
       ? // always return a new clone of the Entity to avoid mutation by ref
-        new Entity<T>(
+        (new Entity<T>(
           ref,
           id,
           // returning a clone of the typeMap array and each TypedMapEntry to prevent unexpected mutations
           (
             entities[ref][id].entries as TypedMapEntry<keyof T, T[keyof T]>[]
           ).map((v) => new TypedMapEntry(v.key, v.value))
-        )
-      : await (async () => {
+        ) as Entity<T> & T)
+      : ((async () => {
           let fromDb: T | boolean = false;
           // attempt to pull from db...
           try {
@@ -208,9 +243,9 @@ export class Store {
                   );
                 })) ||
                 []
-            ) as unknown as T & Entity<T>;
+            );
           }
-        })()) as unknown as T & Entity<T>;
+        })() as Promise<Entity<T> & T>);
   }
 
   static async set<T extends { id: string }>(

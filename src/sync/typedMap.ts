@@ -1,12 +1,14 @@
+// Each types entry holds a <gernerically> typed key => value pair
 import { TypedMapEntry } from "./typepMapEntry";
 
+// throw error if condition isnt met
 const assert = (condition: boolean, error: string) => {
   if (!condition) {
     throw new Error(error);
   }
 };
 
-// Typed map
+// Generically Typed map of TypedMapEntry entries
 export class TypedMap<K extends string | number | symbol, V> {
   entries: Array<TypedMapEntry<K, V>>;
 

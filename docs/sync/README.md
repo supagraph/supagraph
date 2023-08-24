@@ -49,7 +49,7 @@ We then supply a `Sync` object as the only parameter to `addSync()`. The `Sync` 
 
 If this database is fresh then the `Sync` will begin from the provided `CONTRACT_START_BLOCK`, otherwise we'll pick up where we left off on the last sync and pull any new events that have been emitted since.
 
-Each `log` discovered in a `sync()` will be passed through the `onEvent()` handler, this function is supplied the `args` (typed according to the `addSync` generic) parsed from the `log` data along with some `tx` and `block` data. The extent of how much `tx` and `block` data depends on the configuration we feed through the `sync()` method (see section on ["Syncing"](#syncing)), if we want to include the full `tx` and `block` data, then we need to opt-in by feeding the appropriate options (`{ skipBlocks: false, skipTransactions: false, skipOptionalArgs: false }`) when calling `sync(options)`.
+Each `log` discovered in a `sync()` will be passed through the `onEvent()` handler, this function is supplied the `args` (typed according to the `addSync` generic) parsed from the `log` data along with some `tx` and `block` data. The extent of how much `tx` and `block` data depends on the configuration we feed through the `sync()` method (see section on ["Syncing"](#syncing)), if we want to include the full `tx` and `block` data, then we need to opt-in by feeding the appropriate options (`{ collectBlocks: true, collectTxReceipts: false }`) when calling `sync(options)`.
 
 ### How can I find the correct information to feed to an `addSync` handler?
 
@@ -145,25 +145,31 @@ The `sync()` method accepts an optional set of options:
 sync: (options: {
   start?: keyof typeof Stage | false;
   stop?: keyof typeof Stage | false;
-  skipBlocks?: boolean;
-  skipTransactions?: boolean;
-  skipOptionalArgs?: boolean;
+  collectBlocks?: boolean;
+  collectTxReceipts?: boolean;
+  silent?: boolean;
+  listen?: boolean;
+  cleanup?: boolean;
+  onError?: (close: () => Promise<void>) => Promise<void>;
 }) => Promise<SyncSummary>;
 ```
 
 1. `start`: Which `Stage` of the process do we start syncing from? (`"events"`, `"blocks"`, `"transactions"`, `"sort"`, `"process"`)
 2. `stop`: Which `Stage` of the process do we stop syncing? (`"events"`, `"blocks"`, `"transactions"`, `"sort"`, `"process"`)
-3. `skipBlocks`: Skip collecting the `block` data for the `logs` we discover
-4. `skipTransactions`: Skip collecting the `tx` data for the `logs` we discover
-5. `skipOptionalArgs`: Don't attempt to provide the full `tx`/`block` as `args` to the `handler` (use a lighter version which can be built from the `log` data)
+3. `collectBlocks`: Collect the `block` data for the `logs` we discover
+4. `collectTxReceipts`: Collect the `tx` data for the `logs` we discover
+5. `silent`: Disable log output
+6. `listen`: Listen for new events as they are emitted on the network
+7. `cleanup`: Delete tmp files after performing an initial sync
+8. `onError`: Handler called if error is thrown during listener execution
 
 The first two options (start and stop) allow us to initiate partial runs and save any discovered `events`/`blocks`/`txs` to disk. This can be useful for situations where we might want to make many changes to the handlers, but we won't be changing the contract data, we can run through everything once then on subsequent runs, move the start position to `"process"` to avoid fetching all the event data again.
 
 We're also able to construct our entity collections much quicker if we supply an option set which doesn't collect `tx` or `block` information at all, but there are few things we should be aware of;
 
 - All events from all handlers are sorted by block prior to processing to ensure we approach them in the correct order.
-- If we are collecting blocks from multiple chains and the order that events are processed matters for the resultant `Entity`, we must use `skipBlocks = false` to collect all `blocks` enabling us to sort by `block.timestamp`
-- If we use `skipTransactions`, we're unable to say which address the `log` relates to, this is okay in situations like `erc20` tokens, because they emit a `from` address in the `log` data.
+- If we are collecting blocks from multiple chains and the order that events are processed matters for the resultant `Entity`, we must use `collectBlocks = false` to collect all `blocks` enabling us to sort by `block.timestamp`
+- If we use `collectTxReceipts`, we're unable to say which address the `log` relates to, this is okay in situations like `erc20` tokens, because they emit a `from` address in the `log` data.
 
 Finally we need to think about how often we call this `sync` method, it would never make sense to call it more frequently than the average block time, but there really is no bound for how infrequently we call it.
 

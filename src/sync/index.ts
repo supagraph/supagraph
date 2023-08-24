@@ -1,9 +1,18 @@
-// expose db to handlers
+// Expose db to handlers
 export { DB } from "./db";
 export { Mongo } from "./mongo";
 
-// expose store to handlers
-export { Store, getEntities, getEngine } from "./store";
+// Expose level-db entity store to handlers via engine
+export { Entity, Store, getEngine, setEngine } from "./store";
 
-// add syncs and execute them
-export { Stage, sync, addSync } from "./toolkit";
+// Add syncs and execute them
+export {
+  sync,
+  setSyncs,
+  addSync,
+  enqueuePromise,
+  processPromiseQueue,
+} from "./toolkit";
+
+// Set up configs and syncs (types)
+export type { Handlers, SyncConfig, Stage } from "./toolkit";

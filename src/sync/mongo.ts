@@ -1,10 +1,10 @@
-/* eslint-disable no-underscore-dangle, max-classes-per-file */
-
+// Mongo class wraps mongo with a simple entity management system (abstract-leveldown compatible)
 import type { AnyBulkWriteOperation, Document, MongoClient } from "mongodb";
 
+// Extend from db (abstract-leveldown compatible kv implementation)
 import { DB } from "./db";
 
-// this should probably just be string - Record<string, string | number | Buffer> (or anything else which is valid in a mongo setting)
+// This should probably just be string - Record<string, string | number | Buffer> (or anything else which is valid in a mongo setting)
 type KV = Record<string, Record<string, Record<string, unknown> | null>>;
 
 // Error to throw with a .notFound prop set to true
@@ -85,6 +85,7 @@ export class Mongo extends DB {
 
   // get from mongodb
   async get(key: string) {
+    // short-cut the response - we're not storing anything here internally to avoid mem-issues
     if (this.kv[key]) {
       return this.kv[key];
     }
@@ -92,6 +93,7 @@ export class Mongo extends DB {
     // otherwise spit the key and get from mongo
     const [ref, id] = key.split(".");
 
+    // for valid reqs...
     if (ref && id) {
       // this wants to get only the most recent insertion
       return (await Promise.resolve(this.db))
@@ -107,6 +109,7 @@ export class Mongo extends DB {
     // spit the key and get from mongo
     const [ref, id] = key.split(".");
 
+    // for valid reqs...
     if (ref && id) {
       // get the collection for this entity
       const collection = (await Promise.resolve(this.db)).collection(ref);
@@ -127,7 +130,7 @@ export class Mongo extends DB {
       );
 
       // this will update the most recent entry or upsert a new document (do we want this to insert a new doc every update?)
-      (await Promise.resolve(this.db)).collection(ref).updateOne(
+      await (await Promise.resolve(this.db)).collection(ref).updateOne(
         {
           ...(document || {}),
           id,
@@ -149,6 +152,7 @@ export class Mongo extends DB {
     // spit the key and get from mongo
     const [ref, id] = key.split(".");
 
+    // for valid reqs...
     if (ref && id) {
       // get the collection for this entity
       const collection = (await Promise.resolve(this.db)).collection(ref);
@@ -156,8 +160,9 @@ export class Mongo extends DB {
       // would it be better to put an empty here instead?
       const document = collection.findOne({ id }, { sort: { _block_ts: -1 } });
 
+      // delete the single document we discovered
       if (document) {
-        collection.deleteOne(document);
+        await collection.deleteOne(document);
       }
     }
 
@@ -245,6 +250,9 @@ export class Mongo extends DB {
           return operations;
         }, [] as unknown as AnyBulkWriteOperation<Document>[]),
         {
+          // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
+          ordered: false,
+          // write objectIds mongo side
           forceServerObjectId: true,
         }
       );

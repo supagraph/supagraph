@@ -285,7 +285,6 @@ export const toPlural = (non_plural_string: string): string => {
   }
 
   // run through the rules and carry out the match
-  // eslint-disable-next-line no-restricted-syntax
   for (const rule of rules.reverse()) {
     const match = non_plural_string.match(rule.expr);
     // check the match on [1] then [0] so that we can step to the right criteria (this avoids bug in `mouse` regexp)

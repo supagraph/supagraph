@@ -283,7 +283,10 @@ export const createMultiQuery = (
       }
       // never show more than 500 entries so as not to trigger the exceeds 4mb limit of nextjs
       if (typeof first !== "undefined" || results.length > 500) {
-        results = results.slice(0, Math.min(500, parseInt(first, 10) || 500));
+        results = results.slice(
+          0,
+          Math.min(500, parseInt(first || "25", 10) || 25)
+        );
       }
     } else if (results.length > Math.min(500, parseInt(first, 10) || 500)) {
       // never show more than 500 entries so as not to trigger the exceeds 4mb limit of nextjs

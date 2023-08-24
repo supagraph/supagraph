@@ -14,6 +14,12 @@ dependencies:
   csv-write-stream:
     specifier: ^2.0.0
     version: registry.npmjs.org/csv-write-stream@2.0.0
+  dotenv:
+    specifier: ^16.3.1
+    version: registry.npmjs.org/dotenv@16.3.1
+  ethereum-bloom-filters:
+    specifier: ^1.0.10
+    version: registry.npmjs.org/ethereum-bloom-filters@1.0.10
   ethers:
     specifier: ^5.7.2
     version: registry.npmjs.org/ethers@5.7.2
@@ -72,7 +78,7 @@ devDependencies:
     version: registry.npmjs.org/eslint-config-prettier@8.5.0(eslint@7.32.0)
   eslint-config-turbo:
     specifier: latest
-    version: registry.npmjs.org/eslint-config-turbo@1.10.6(eslint@7.32.0)
+    version: registry.npmjs.org/eslint-config-turbo@1.10.12(eslint@7.32.0)
   eslint-import-resolver-typescript:
     specifier: ^3.5.2
     version: registry.npmjs.org/eslint-import-resolver-typescript@3.5.2(eslint-plugin-import@2.26.0)(eslint@7.32.0)
@@ -1562,6 +1568,13 @@ packages:
     engines: {node: '>=12'}
     dev: true
 
+  registry.npmjs.org/dotenv@16.3.1:
+    resolution: {integrity: sha512-IPzF4w4/Rd94bA9imS68tZBaYyBWSCE47V1RGuMrB94iyTOIEwRmVL2x/4An+6mETpLrKJ5hQkB8W4kFAadeIQ==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/dotenv/-/dotenv-16.3.1.tgz}
+    name: dotenv
+    version: 16.3.1
+    engines: {node: '>=12'}
+    dev: false
+
   registry.npmjs.org/dset@3.1.2:
     resolution: {integrity: sha512-g/M9sqy3oHe477Ar4voQxWtaPIFw1jTdKZuomOjhCcBx9nHUNn0pu6NopuFFrTh/TRZIKEj+76vLWFu9BNKk+Q==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/dset/-/dset-3.1.2.tgz}
     name: dset
@@ -1770,16 +1783,16 @@ packages:
       eslint: registry.npmjs.org/eslint@7.32.0
     dev: true
 
-  registry.npmjs.org/eslint-config-turbo@1.10.6(eslint@7.32.0):
-    resolution: {integrity: sha512-iZ63etePRUdEIDY5MxdUhU2ekV9TDbVdHg0BK00QqVFgQTXUYuJ7rsQj/wUKTsw3jwhbLfaY6H5sknAgYyWZ2g==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-config-turbo/-/eslint-config-turbo-1.10.6.tgz}
-    id: registry.npmjs.org/eslint-config-turbo/1.10.6
+  registry.npmjs.org/eslint-config-turbo@1.10.12(eslint@7.32.0):
+    resolution: {integrity: sha512-z3jfh+D7UGYlzMWGh+Kqz++hf8LOE96q3o5R8X4HTjmxaBWlLAWG+0Ounr38h+JLR2TJno0hU9zfzoPNkR9BdA==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-config-turbo/-/eslint-config-turbo-1.10.12.tgz}
+    id: registry.npmjs.org/eslint-config-turbo/1.10.12
     name: eslint-config-turbo
-    version: 1.10.6
+    version: 1.10.12
     peerDependencies:
       eslint: '>6.6.0'
     dependencies:
       eslint: registry.npmjs.org/eslint@7.32.0
-      eslint-plugin-turbo: registry.npmjs.org/eslint-plugin-turbo@1.10.6(eslint@7.32.0)
+      eslint-plugin-turbo: registry.npmjs.org/eslint-plugin-turbo@1.10.12(eslint@7.32.0)
     dev: true
 
   registry.npmjs.org/eslint-import-resolver-node@0.3.7:
@@ -1971,11 +1984,11 @@ packages:
       string.prototype.matchall: registry.npmjs.org/string.prototype.matchall@4.0.8
     dev: true
 
-  registry.npmjs.org/eslint-plugin-turbo@1.10.6(eslint@7.32.0):
-    resolution: {integrity: sha512-jlzfxYaK8hcz1DTk8Glxxi1r0kgdy85191a4CbFOTiiBulmKHMLJgzhsyE9Ong796MA62n91KFpc20BiKjlHwg==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-plugin-turbo/-/eslint-plugin-turbo-1.10.6.tgz}
-    id: registry.npmjs.org/eslint-plugin-turbo/1.10.6
+  registry.npmjs.org/eslint-plugin-turbo@1.10.12(eslint@7.32.0):
+    resolution: {integrity: sha512-uNbdj+ohZaYo4tFJ6dStRXu2FZigwulR1b3URPXe0Q8YaE7thuekKNP+54CHtZPH9Zey9dmDx5btAQl9mfzGOw==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-plugin-turbo/-/eslint-plugin-turbo-1.10.12.tgz}
+    id: registry.npmjs.org/eslint-plugin-turbo/1.10.12
     name: eslint-plugin-turbo
-    version: 1.10.6
+    version: 1.10.12
     peerDependencies:
       eslint: '>6.6.0'
     dependencies:
@@ -2144,6 +2157,14 @@ packages:
     version: 2.0.3
     engines: {node: '>=0.10.0'}
     dev: true
+
+  registry.npmjs.org/ethereum-bloom-filters@1.0.10:
+    resolution: {integrity: sha512-rxJ5OFN3RwjQxDcFP2Z5+Q9ho4eIdEmSc2ht0fCu8Se9nbXjZ7/031uXoUYJ87KHCOdVeiUuwSnoS7hmYAGVHA==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/ethereum-bloom-filters/-/ethereum-bloom-filters-1.0.10.tgz}
+    name: ethereum-bloom-filters
+    version: 1.0.10
+    dependencies:
+      js-sha3: registry.npmjs.org/js-sha3@0.8.0
+    dev: false
 
   registry.npmjs.org/ethers@5.7.2:
     resolution: {integrity: sha512-wswUsmWo1aOK8rR7DIKiWSw9DbLWe6x98Jrn8wcTflTVvaXhAMaB5zGAXy0GYQEQp9iO1iSHWVyARQm11zUtyg==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/ethers/-/ethers-5.7.2.tgz}

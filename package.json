@@ -1,6 +1,6 @@
 {
   "name": "supagraph",
-  "version": "0.0.1-beta",
+  "version": "0.0.1-rc.1",
   "author": "grezle",
   "license": "MIT",
   "description": "RPC indexer and GraphQL server",
@@ -55,6 +55,8 @@
     "@graphql-yoga/render-graphiql": "~3.8.0",
     "csv-parser": "^3.0.0",
     "csv-write-stream": "^2.0.0",
+    "dotenv": "^16.3.1",
+    "ethereum-bloom-filters": "^1.0.10",
     "ethers": "^5.7.2",
     "graphql": "^16.6.0",
     "graphql-scalars": "^1.21.3",

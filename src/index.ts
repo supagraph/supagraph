@@ -1,6 +1,6 @@
-// export everything from ./sync
+// Export everything from ./sync
 export * from "./sync";
-// export everything from ./graphql
+// Export everything from ./graphql
 export * from "./graphql";
-// export everything from ./utils
+// Export everything from ./utils
 export * from "./utils";

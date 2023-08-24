@@ -1,5 +1,3 @@
-/* eslint-disable no-restricted-syntax, @typescript-eslint/no-use-before-define */
-
 // Import types from graphql
 import type {
   FieldNode,
@@ -214,18 +212,35 @@ function getArgs(
       };
     }
   ): { [x: string]: any } {
-    // console.log(arg.name.value, !arg.value.value && arg.value.fields);
+    // console.log(arg.name.value, arg.value.kind, arg.value.value);
     return {
       ...carr,
       [arg.name.value]:
+        // place variable (allowing for numerics to be parsed)
         (arg.value.kind === "Variable"
-          ? variables[arg.value.name.value]
+          ? Number.isNaN(variables[arg.value.name.value])
+            ? variables[arg.value.name.value]
+            : [
+                { $toString: `$${(arg.name.value as string).split("_")[0]}` },
+                variables[arg.value.name.value],
+              ]
+          : // place string values allowing for numerics to be parsed
+          arg.value.kind === "StringValue"
+          ? [
+              { $toString: `$${(arg.name.value as string).split("_")[0]}` },
+              arg.value.value,
+            ]
+          : // always parse ints and place everything else as is
+          arg.value.kind === "IntValue"
+          ? parseFloat(arg.value.value)
           : arg.value.value) ||
+        // for list values we need to map out the given vals
         (arg.value.kind === "ListValue" &&
           arg.value.values &&
           arg.value.values.map((val) => {
             return val.value;
           })) ||
+        // if there are multiple fields, we want to recurisively run through this process
         arg.value.fields?.reduce((nested, child) => {
           return doReduce(
             nested,
@@ -592,30 +607,28 @@ function generateMongoFilter(filter: GraphqlFilter): Record<string, any> {
   for (const key in filter) {
     const value = filter[key];
 
-    if (value !== undefined) {
-      // Map the GraphQL operator to the corresponding MongoDB operator
-      const operator = graphqlToMongoOperatorMap[key];
+    // Map the GraphQL operator to the corresponding MongoDB operator
+    const operator = graphqlToMongoOperatorMap[key];
 
-      if (operator) {
-        if (operator === "$regex") {
-          // Handle regex-based operators with special transformations
-          const regexFlags = regexFlagsMap[key];
-          let regexValue = value;
+    if (operator) {
+      if (operator === "$regex") {
+        // Handle regex-based operators with special transformations
+        const regexFlags = regexFlagsMap[key];
+        let regexValue = value;
 
-          if (key === "_contains" || key === "_not_contains") {
-            regexValue = `.*${regexValue}.*`;
-          } else if (key === "_starts_with" || key === "_not_starts_with") {
-            regexValue = `^${regexValue}`;
-          } else if (key === "_ends_with" || key === "_not_ends_with") {
-            regexValue = `${regexValue}$`;
-          }
-
-          // Create a RegExp object with the transformed value and flags
-          mongoFilter[operator] = new RegExp(regexValue, regexFlags);
-        } else {
-          // Assign the value directly for non-regex operators
-          mongoFilter[operator] = value;
+        if (key === "_contains" || key === "_not_contains") {
+          regexValue = `.*${regexValue}.*`;
+        } else if (key === "_starts_with" || key === "_not_starts_with") {
+          regexValue = `^${regexValue}`;
+        } else if (key === "_ends_with" || key === "_not_ends_with") {
+          regexValue = `${regexValue}$`;
         }
+
+        // Create a RegExp object with the transformed value and flags
+        mongoFilter[operator] = new RegExp(regexValue, regexFlags);
+      } else {
+        // Assign the value directly for non-regex operators
+        mongoFilter[operator] = value !== undefined ? value : null;
       }
     }
   }
@@ -687,27 +700,48 @@ function createArgs(args: Record<string, any>) {
           return (all, key) => {
             // split the current key - if it has an _ in it then its a filter.
             const splitKey = key.split("_");
-            // check if there is a filter available at the end of the current key
-            const hasFilter =
+            const filterKey =
               splitKey.length >= 2 &&
-              graphqlToMongoOperatorMap[`_${splitKey[splitKey.length - 1]}`];
+              (graphqlToMongoOperatorMap[
+                `_${splitKey[splitKey.length - 2]}_${
+                  splitKey[splitKey.length - 1]
+                }`
+              ]
+                ? `_${splitKey[splitKey.length - 2]}_${
+                    splitKey[splitKey.length - 1]
+                  }`
+                : graphqlToMongoOperatorMap[`_${splitKey[splitKey.length - 1]}`]
+                ? `_${splitKey[splitKey.length - 1]}`
+                : false);
+            // check if there is a filter available at the end of the current key
+            const hasFilter = splitKey.length >= 2 && filterKey;
+            // construct the query from the mapped fields and filters
+            const query = hasFilter
+              ? generateMongoFilter({
+                  [filterKey]: where[key],
+                })
+              : where[key];
 
             // return all results
             return {
               // keep everything collected so far
               ...all,
               // spread all descendents into the same object
-              ...(typeof where[key] !== "object"
-                ? // check for a filter or a final match value
-                  {
-                    [`${useKey ? `${useKey}.` : ``}${
-                      hasFilter ? key.substring(0, key.lastIndexOf("_")) : key
-                    }`]: hasFilter
-                      ? generateMongoFilter({
-                          [`_${splitKey[splitKey.length - 1]}`]: where[key],
-                        })
-                      : where[key],
-                  }
+              ...(!where[key] ||
+              typeof where[key] !== "object" ||
+              Array.isArray(where[key])
+                ? Array.isArray(where[key]) &&
+                  !Array.isArray(query) &&
+                  key.indexOf("_in") !== key.length - 3
+                  ? // if we're putting an array as the where key then we're pushing an expr
+                    {
+                      $expr: query,
+                    }
+                  : {
+                      [`${useKey ? `${useKey}.` : ``}${
+                        hasFilter ? key.replace(filterKey, "") : key
+                      }`]: Array.isArray(query) ? query[1] : query,
+                    }
                 : // check for nested filters defined in the query
                   {
                     // recurse through doReduce and hydrate everything in to the parent
@@ -1079,7 +1113,9 @@ export function createQuery(
               // sort after grouping (this is likely more expensive because we're sorting on a projection - hopefully the filter has limited the items enough)
               $sort: {
                 // use given sort and direction
-                [args?.orderBy || "id"]:
+                [(Array.isArray(args?.orderBy)
+                  ? args?.orderBy[1]
+                  : args?.orderBy) || "id"]:
                   args.orderDirection === "desc" ? -1 : 1,
               },
             },
@@ -1089,7 +1125,9 @@ export function createQuery(
               // sort the items before performing lookups/matches to make sure we're using the index
               $sort: {
                 // use given sort and direction or default to id (to keep it consistent)
-                [args?.orderBy || "id"]:
+                [(Array.isArray(args?.orderBy)
+                  ? args?.orderBy[1]
+                  : args?.orderBy) || "id"]:
                   args.orderDirection === "desc" ? -1 : 1,
               },
             },
@@ -1126,11 +1164,19 @@ export function createQuery(
         : false,
       // set the pagination offsets and limits
       {
-        $skip: parseInt(args?.skip || "0", 10),
+        $skip: parseInt(
+          (Array.isArray(args?.skip) ? args?.skip[1] : args?.skip) || "0",
+          10
+        ),
       },
       {
-        $limit:
-          parseInt(args?.skip || "0", 10) + parseInt(args?.first || "25", 10),
+        $limit: Math.min(
+          500,
+          parseInt(
+            (Array.isArray(args?.first) ? args?.first[1] : args?.first) || "25",
+            10
+          ) || 25
+        ),
       },
       // project all fields that are being requested in the output
       ...(!mutable
@@ -1233,19 +1279,22 @@ export function unwindResult(
     entities[entity] = entities[entity] || [];
     entityIndex[entity] = entityIndex[entity] || [];
 
-    // check position in index
-    const index = entityIndex[entity].indexOf(pushEntity.id);
+    // if we have an entity to push...
+    if (pushEntity.id) {
+      // check position in index
+      const index = entityIndex[entity].indexOf(pushEntity.id);
 
-    // insert new entities
-    if (index === -1) {
-      entities[entity].push(pushEntity);
-      entityIndex[entity].push(pushEntity.id);
-    } else {
-      // combine the entries in position
-      entities[entity].splice(index, 1, {
-        ...entities[entity][index],
-        ...pushEntity,
-      });
+      // insert new entities
+      if (index === -1) {
+        entities[entity].push(pushEntity);
+        entityIndex[entity].push(pushEntity.id);
+      } else {
+        // combine the entries in position
+        entities[entity].splice(index, 1, {
+          ...entities[entity][index],
+          ...pushEntity,
+        });
+      }
     }
   });
 

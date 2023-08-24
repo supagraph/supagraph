@@ -1,6 +1,7 @@
+// Import base level of options from yoga
 import type { GraphiQLOptions } from "graphql-yoga";
 
-// import the original render command
+// Import the original render command
 import { renderGraphiQL as doRender } from "@graphql-yoga/render-graphiql";
 
 // Render the html content

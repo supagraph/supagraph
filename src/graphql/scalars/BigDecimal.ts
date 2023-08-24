@@ -1,4 +1,4 @@
-/* eslint-disable no-nested-ternary, no-underscore-dangle */
+// Import base types to extend
 import { GraphQLScalarType, GraphQLScalarTypeConfig } from "graphql/type";
 
 // using built in BigInt to construct BigDecimal

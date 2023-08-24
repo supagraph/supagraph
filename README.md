@@ -207,7 +207,7 @@ To create a new supagraph `syncOp[]` handler and keep the `supagraph` data `Stor
    });
    ```
 
-3. The `supagraph` instance is a `http` compatible server implementation and can be exposed wherever the `GET`/`POST` - `request`/`response` interface is implemented, for example;
+3. The `supagraph` instance is a `http` compatible server implementation and can be exposed wherever the `handler(request)` interface is implemented, for example;
 
    - As a `nodejs` `http` sever
 

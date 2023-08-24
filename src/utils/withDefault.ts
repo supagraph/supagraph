@@ -1,4 +1,4 @@
-// provide a default value and type the response
+// Provide a default value and type the response
 export const withDefault = <T>(value: unknown, defaultValue: T) => {
   // if the default is a number, parse value as int
   if (typeof defaultValue === "number") {

@@ -29,6 +29,18 @@ module.exports = {
     'turbo/no-undeclared-env-vars': 'off',
     'import/no-extraneous-dependencies': 'off',
     'import/prefer-default-export': 'off',
+    'radix': 'off', 
+    'no-console': 'off', 
+    'no-multi-assign': 'off', 
+    'no-await-in-loop': 'off', 
+    'no-restricted-syntax': 'off', 
+    'no-param-reassign': 'off', 
+    'no-underscore-dangle': 'off', 
+    'no-multi-assign': 'off',
+    'no-nested-ternary': 'off',
+    'max-classes-per-file': 'off',
+    '@typescript-eslint/no-loop-func': 'off',
+    '@typescript-eslint/no-use-before-define': 'off'
   },
   ignorePatterns: [
     '**/*.js',

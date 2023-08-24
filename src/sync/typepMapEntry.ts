@@ -1,4 +1,4 @@
-// TypedMap entry
+// Generically typed TypedMap entry
 export class TypedMapEntry<K, V> {
   key: K;
 
