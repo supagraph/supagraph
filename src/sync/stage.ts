@@ -147,11 +147,19 @@ export class Stage extends DB {
         : [];
       // drop the last item if it matches current item (set in the same block)
       if (
-        currentSet.length &&
-        (currentSet[currentSet.length - 1] as unknown as { _chain_id: number })
-          ._chain_id === val._chain_id &&
-        (currentSet[currentSet.length - 1] as unknown as { _block_num: number })
-          ._block_num === val._block_num
+        (currentSet.length &&
+          (
+            currentSet[currentSet.length - 1] as unknown as {
+              _chain_id: number;
+            }
+          )._chain_id === val._chain_id &&
+          (
+            currentSet[currentSet.length - 1] as unknown as {
+              _block_num: number;
+            }
+          )._block_num === val._block_num) ||
+        // we can always pop for __meta__ entries (these don't need to be immutable ever)
+        key.indexOf("__meta__") !== -1
       ) {
         currentSet.pop();
       }
