@@ -210,7 +210,7 @@ export class Mongo extends DB {
                   // each entry is unique by block and id
                   id: val.key.split(".")[1],
                   // if ids are unique then we can place by update
-                  ...(this.mutable
+                  ...(this.mutable || collection === "__meta__"
                     ? {}
                     : {
                         _block_ts: val.value?._block_ts,
