@@ -2362,6 +2362,7 @@ const processBlock = async (
   callbacks: HandlerFns,
   queueLength: number,
   asyncParts: Promise<{
+    cancelled?: boolean;
     block: BlockWithTransactions & any;
     receipts: Record<string, TransactionReceipt>;
   }>
@@ -2399,206 +2400,245 @@ const processBlock = async (
   // log that we're starting
   if (!silent) process.stdout.write(`\nEvents processed `);
 
-  // get the full block details
-  const { block } = await asyncParts;
+  // await obj containing parts
+  const parts = await asyncParts;
+
+  // unpack the async parts  - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
+  const { block, receipts, cancelled } = parts;
   // set the chainId into the engine
   Store.setChainId(chainId);
   // set the block for each operation into the engine before we run the handler
   Store.setBlock(block);
 
-  // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-  const { receipts } = await asyncParts;
-
-  // run through the ops and extract all events happening in this block to be sorted into logIndex order
-  for (const op of validOps[chainId]) {
-    // check for block/tx/event by eventName (and check for matching callback)
-    if (op.eventName === "onBlock" && callbacks[`${chainId}-${op.eventName}`]) {
-      // record the event
-      events.push({
-        ...op,
-        id: `${chainId}`,
-        chainId,
-        timestamp: collectBlocks && block.timestamp,
-        data: {
-          blockNumber: block.number,
-        },
-        blockNumber: block.number,
-        eventName: op.eventName,
-        args: [],
-        tx: {} as TransactionReceipt & TransactionResponse,
-        // onBlock first
-        txIndex: -2,
-        logIndex: -2,
-      });
-    } else if (
-      op.eventName === "onTransaction" &&
-      callbacks[`${chainId}-${op.eventName}`]
-    ) {
-      // create a new event for every transaction in the block
-      for (const tx of block.transactions) {
-        // record the event
-        events.push({
-          ...op,
-          id: `${chainId}`,
-          chainId,
-          timestamp: collectBlocks && block.timestamp,
-          data: {
+  // check that we havent cancelled this operation
+  if (!cancelled) {
+    // run through the ops and extract all events happening in this block to be sorted into logIndex order
+    for (const op of validOps[chainId]) {
+      if (!parts.cancelled) {
+        // check for block/tx/event by eventName (and check for matching callback)
+        if (
+          op.eventName === "onBlock" &&
+          callbacks[`${chainId}-${op.eventName}`]
+        ) {
+          // record the event
+          events.push({
+            ...op,
+            id: `${chainId}`,
+            chainId,
+            timestamp: collectBlocks && block.timestamp,
+            data: {
+              blockNumber: block.number,
+            },
             blockNumber: block.number,
-          },
-          blockNumber: block.number,
-          eventName: op.eventName,
-          args: [],
-          tx: {
-            ...tx,
-            ...(collectTxReceipts || op.opts?.collectTxReceipts
-              ? receipts[tx.hash]
-              : {}),
-          },
-          // onTx first out of tx & events
-          txIndex: tx.transactionIndex,
-          logIndex: -1,
-        });
-      }
-    } else if (
-      op.address &&
-      callbacks[`${getAddress(op.address)}-${op.eventName}`]
-    ) {
-      // check for a matching topic in the transactions logBloom
-      const iface = eventIfaces[`${getAddress(op.address)}-${op.eventName}`];
-      const topic = iface.getEventTopic(op.eventName);
-      const hasEvent =
-        isTopicInBloom(block.logsBloom, topic) &&
-        isContractAddressInBloom(block.logsBloom, op.address);
-
-      // check for logs on the block
-      if (hasEvent) {
-        // now we need to find the transaction that created this logEvent
-        for (const tx of block.transactions) {
-          // check if the tx has the event...
-          const txHasEvent =
-            isTopicInBloom(receipts[tx.hash].logsBloom, topic) &&
-            isContractAddressInBloom(receipts[tx.hash].logsBloom, op.address);
-          // check for logs on the tx
-          if (txHasEvent) {
-            // check each log for a match
-            for (const log of receipts[tx.hash].logs) {
-              if (
-                log.topics[0] === topic &&
-                getAddress(log.address) === getAddress(op.address)
-              ) {
-                // find the args for the matching log item
-                const { args } = iface.parseLog({
-                  topics: log.topics,
-                  data: log.data,
-                });
-                // record the event
-                events.push({
-                  ...op,
-                  id: `${getAddress(op.address)}`,
-                  chainId,
-                  timestamp: collectBlocks && block.timestamp,
-                  data: {
-                    blockNumber: block.number,
-                  },
+            eventName: op.eventName,
+            args: [],
+            tx: {} as TransactionReceipt & TransactionResponse,
+            // onBlock first
+            txIndex: -2,
+            logIndex: -2,
+          });
+        } else if (
+          op.eventName === "onTransaction" &&
+          callbacks[`${chainId}-${op.eventName}`]
+        ) {
+          // create a new event for every transaction in the block
+          for (const tx of block.transactions) {
+            if (!parts.cancelled) {
+              // record the event
+              events.push({
+                ...op,
+                id: `${chainId}`,
+                chainId,
+                timestamp: collectBlocks && block.timestamp,
+                data: {
                   blockNumber: block.number,
-                  eventName: op.eventName,
-                  args,
-                  tx: {
-                    ...tx,
-                    ...(collectTxReceipts || op.opts?.collectTxReceipts
-                      ? receipts[tx.hash]
-                      : {}),
-                  },
-                  // order as defined
-                  txIndex: tx.transactionIndex,
-                  logIndex:
-                    typeof log.logIndex === "undefined"
-                      ? (log as any).index
-                      : log.logIndex,
-                });
+                },
+                blockNumber: block.number,
+                eventName: op.eventName,
+                args: [],
+                tx: {
+                  ...tx,
+                  ...(collectTxReceipts || op.opts?.collectTxReceipts
+                    ? receipts[tx.hash]
+                    : {}),
+                },
+                // onTx first out of tx & events
+                txIndex: tx.transactionIndex,
+                logIndex: -1,
+              });
+            }
+          }
+        } else if (
+          op.address &&
+          callbacks[`${getAddress(op.address)}-${op.eventName}`]
+        ) {
+          // check for a matching topic in the transactions logBloom
+          const iface =
+            eventIfaces[`${getAddress(op.address)}-${op.eventName}`];
+          const topic = iface.getEventTopic(op.eventName);
+          const hasEvent =
+            isTopicInBloom(block.logsBloom, topic) &&
+            isContractAddressInBloom(block.logsBloom, op.address);
+
+          // check for logs on the block
+          if (hasEvent) {
+            // now we need to find the transaction that created this logEvent
+            for (const tx of block.transactions) {
+              if (!parts.cancelled) {
+                // check if the tx has the event...
+                const txHasEvent =
+                  isTopicInBloom(receipts[tx.hash].logsBloom, topic) &&
+                  isContractAddressInBloom(
+                    receipts[tx.hash].logsBloom,
+                    op.address
+                  );
+                // check for logs on the tx
+                if (txHasEvent) {
+                  // check each log for a match
+                  for (const log of receipts[tx.hash].logs) {
+                    if (
+                      !parts.cancelled &&
+                      log.topics[0] === topic &&
+                      getAddress(log.address) === getAddress(op.address)
+                    ) {
+                      // find the args for the matching log item
+                      const { args } = iface.parseLog({
+                        topics: log.topics,
+                        data: log.data,
+                      });
+                      // record the event
+                      events.push({
+                        ...op,
+                        id: `${getAddress(op.address)}`,
+                        chainId,
+                        timestamp: collectBlocks && block.timestamp,
+                        data: {
+                          blockNumber: block.number,
+                        },
+                        blockNumber: block.number,
+                        eventName: op.eventName,
+                        args,
+                        tx: {
+                          ...tx,
+                          ...(collectTxReceipts || op.opts?.collectTxReceipts
+                            ? receipts[tx.hash]
+                            : {}),
+                        },
+                        // order as defined
+                        txIndex: tx.transactionIndex,
+                        logIndex:
+                          typeof log.logIndex === "undefined"
+                            ? (log as any).index
+                            : log.logIndex,
+                      });
+                    }
+                  }
+                }
               }
             }
           }
         }
       }
     }
-  }
 
-  // print number of events in stdout
-  if (!silent) process.stdout.write(`(${events.length}) `);
+    // make sure we haven't been cancelled before we get here
+    if (!parts.cancelled) {
+      // print number of events in stdout
+      if (!silent) process.stdout.write(`(${events.length}) `);
 
-  // sort the events
-  const sorted = events.sort((a, b) => {
-    // check the transaction order of the block
-    const txOrder = a.txIndex - b.txIndex;
+      // sort the events
+      const sorted = events.sort((a, b) => {
+        // check the transaction order of the block
+        const txOrder = a.txIndex - b.txIndex;
 
-    // sort the events by logIndex order (with onBlock and onTransaction coming first)
-    return txOrder === 0 ? a.logIndex - b.logIndex : txOrder;
-  });
-
-  // for each of the sync events call the callbacks sequentially
-  for (const event of sorted) {
-    // check for block or tx type handlers
-    const isBlockOrTxEv =
-      ["onBlock", "onTransaction"].indexOf(event.eventName) === 1;
-
-    // check for block/tx/event by eventName (and check for matching callback)
-    if (isBlockOrTxEv && callbacks[`${event.id}-${event.eventName}`]) {
-      // process each block/tx event the same way (logIndex: -1)
-      await callbacks[`${event.id}-${event.eventName}`](event.args, {
-        block,
-        tx: event.tx,
-        logIndex: -1,
+        // sort the events by logIndex order (with onBlock and onTransaction coming first)
+        return txOrder === 0 ? a.logIndex - b.logIndex : txOrder;
       });
-    } else if (!isBlockOrTxEv && callbacks[`${event.id}-${event.eventName}`]) {
-      // process callBack with its true logIndex
-      await callbacks[`${event.id}-${event.eventName}`](event.args, {
-        block,
-        tx: event.tx,
-        logIndex: event.logIndex,
-      });
+
+      // checkpoint only these writes
+      engine?.stage?.checkpoint();
+
+      // for each of the sync events call the callbacks sequentially
+      for (const event of sorted) {
+        if (!parts.cancelled) {
+          // check for block or tx type handlers
+          const isBlockOrTxEv =
+            ["onBlock", "onTransaction"].indexOf(event.eventName) === 1;
+
+          // check for block/tx/event by eventName (and check for matching callback)
+          if (isBlockOrTxEv && callbacks[`${event.id}-${event.eventName}`]) {
+            // process each block/tx event the same way (logIndex: -1)
+            await callbacks[`${event.id}-${event.eventName}`](event.args, {
+              block,
+              tx: event.tx,
+              logIndex: -1,
+            });
+          } else if (
+            !isBlockOrTxEv &&
+            callbacks[`${event.id}-${event.eventName}`]
+          ) {
+            // process callBack with its true logIndex
+            await callbacks[`${event.id}-${event.eventName}`](event.args, {
+              block,
+              tx: event.tx,
+              logIndex: event.logIndex,
+            });
+          }
+        }
+      }
+
+      // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
+      if (!parts.cancelled) await processPromiseQueue(promiseQueue);
+
+      // commit or revert
+      if (!parts.cancelled) {
+        // move thes changes to the parent checkpoint
+        await engine?.stage?.commit();
+      } else {
+        // revert this checkpoint we're not saving it
+        engine?.stage?.revert();
+      }
+
+      // only attempt to save changes when the queue is clear (or it has been 15s since we last stored changes)
+      if (
+        !parts.cancelled &&
+        (queueLength === 0 ||
+          (engine?.lastUpdate || 0) + 15000 <= new Date().getTime())
+      ) {
+        // mark after we end the processing
+        if (!silent) {
+          process.stdout.write(`✔\nEntities stored `);
+        }
+        // commit the checkpoint on the db...
+        await engine?.stage?.commit();
+
+        // after all events are stored in db
+        if (!silent) process.stdout.write("✔\nPointers updated ");
+
+        // update the lastUpdateTime (we have written everything to db - wait a max of 15s before next update)
+        engine.lastUpdate = new Date().getTime();
+      }
+
+      // update the pointers to reflect the latest sync
+      if (!parts.cancelled)
+        await updateSyncPointers(
+          // these events follow enough to pass as SyncEvents
+          sorted as unknown as SyncEvent[],
+          true,
+          new Set([chainId]),
+          syncProviders,
+          // this should be startBlocks
+          {
+            [chainId]: block.number,
+          },
+          latestEntity,
+          []
+        );
+
+      // finished after updating pointers
+      if (!silent && !parts.cancelled) process.stdout.write(`✔\n`);
     }
   }
-
-  // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
-  await processPromiseQueue(promiseQueue);
-
-  // only attempt to save changes when the queue is clear (or it has been 15s since we last stored changes)
-  if (
-    queueLength === 0 ||
-    (engine?.lastUpdate || 0) + 15000 <= new Date().getTime()
-  ) {
-    // mark after we end the processing
-    if (!silent) {
-      process.stdout.write(`✔\nEntities stored `);
-    }
-    // commit the checkpoint on the db...
-    await engine?.stage?.commit();
-
-    // after all events are stored in db
-    if (!silent) process.stdout.write("✔\nPointers updated ");
-
-    // update the lastUpdateTime (we have written everything to db - wait a max of 15s before next update)
-    engine.lastUpdate = new Date().getTime();
-  }
-
-  // update the pointers to reflect the latest sync
-  await updateSyncPointers(
-    // these events follow enough to pass as SyncEvents
-    sorted as unknown as SyncEvent[],
-    true,
-    new Set([chainId]),
-    syncProviders,
-    // this should be startBlocks
-    {
-      [chainId]: block.number,
-    },
-    latestEntity,
-    []
-  );
-
-  // finished after updating pointers
-  if (!silent) process.stdout.write(`✔\n`);
 };
 
 // attach event listeners (listening for blocks)
@@ -2630,6 +2670,7 @@ const attachListeners = async (
     chainId: number;
     number: number;
     asyncParts: Promise<{
+      cancelled?: boolean;
       block: BlockWithTransactions;
       receipts: Record<string, TransactionReceipt>;
     }>;
@@ -2663,47 +2704,69 @@ const attachListeners = async (
       };
     }, {});
 
-  // pull all block and receipt details
+  // pull all block and receipt details (cancel attempt after 30s)
   const getBlockAndReceipts = async (chainId: number, blockNumber: number) => {
-    // get the full block details
-    const block = await getBlockByNumber(syncProviders[+chainId], blockNumber);
+    // return the full block and receipts in 30s or cancel
+    return Promise.race<{
+      cancelled?: boolean;
+      block: BlockWithTransactions;
+      receipts: Record<string, TransactionReceipt>;
+    }>([
+      new Promise((resolve) => {
+        setTimeout(async () => {
+          resolve({
+            cancelled: true,
+            block: {} as BlockWithTransactions,
+            receipts: {} as Record<string, TransactionReceipt>,
+          });
+        }, 30000); // max of 30s per block - we'll adjust if needed
+      }),
+      // fetch all block and receipt details
+      Promise.resolve().then(async () => {
+        // get the full block details
+        const block = await getBlockByNumber(
+          syncProviders[+chainId],
+          blockNumber
+        );
 
-    // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-    const receipts = (
-      await Promise.all(
-        block.transactions.map(async function getReceipt(
-          tx: TransactionResponse
-        ) {
-          // this promise.all is trapped until we resolve all tx receipts in the block
-          try {
-            // get the receipt
-            const fullTx = await syncProviders[+chainId].getTransactionReceipt(
-              tx.hash
-            );
-            // try again
-            if (!fullTx.transactionHash) throw new Error("Missing hash");
+        // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
+        const receipts = (
+          await Promise.all(
+            block.transactions.map(async function getReceipt(
+              tx: TransactionResponse
+            ) {
+              // this promise.all is trapped until we resolve all tx receipts in the block
+              try {
+                // get the receipt
+                const fullTx = await syncProviders[
+                  +chainId
+                ].getTransactionReceipt(tx.hash);
+                // try again
+                if (!fullTx.transactionHash) throw new Error("Missing hash");
 
-            // return the tx
-            return fullTx;
-          } catch {
-            // attempt to get receipt again on failure
-            return getReceipt(tx);
-          }
-        })
-      )
-    ).reduce((all, receipt) => {
-      // combine all receipts to create an indexed lookup obj
-      return {
-        ...all,
-        [receipt.transactionHash]: receipt,
-      };
-    }, {});
+                // return the tx
+                return fullTx;
+              } catch {
+                // attempt to get receipt again on failure
+                return getReceipt(tx);
+              }
+            })
+          )
+        ).reduce((all, receipt) => {
+          // combine all receipts to create an indexed lookup obj
+          return {
+            ...all,
+            [receipt.transactionHash]: receipt,
+          };
+        }, {});
 
-    // return the block and all receipts in the block
-    return {
-      block,
-      receipts,
-    };
+        // return the block and all receipts in the block
+        return {
+          block,
+          receipts,
+        };
+      }),
+    ]);
   };
 
   // record the block for the given chainId
@@ -2776,41 +2839,65 @@ const attachListeners = async (
             const [{ number: blockNumber, chainId, asyncParts }] =
               blocks.splice(0, 1);
 
+            // restack this at the top so that we can try again
+            const restack = () => {
+              blocks.splice(0, 0, {
+                number: blockNumber,
+                chainId,
+                // recreate the async parts to pull everything fresh
+                asyncParts: getBlockAndReceipts(chainId, blockNumber),
+              });
+            };
+
             // check if this block needs to be processed (check its not included in the catchup-set)
             if (
               startBlocks[+chainId] &&
               blockNumber >= startBlocks[+chainId] &&
               blockNumber >= latestBlocks[+chainId].number
             ) {
-              try {
-                // attempt to process the block
-                await processBlock(
-                  +chainId,
-                  validOps,
-                  blockNumber,
-                  collectBlocks,
-                  collectTxReceipts,
-                  silent,
-                  syncProviders,
-                  eventIfaces,
-                  latestEntity,
-                  callbacks,
-                  blocks.length,
-                  asyncParts
-                );
-                // record the new number
-                latestBlocks[+chainId] = {
-                  number: blockNumber,
-                } as unknown as Block;
-              } catch {
-                // restack this at the top so that we can try again
-                blocks.splice(0, 0, {
-                  number: blockNumber,
-                  chainId,
-                  // recreate the async parts to pull everything fresh
-                  asyncParts: getBlockAndReceipts(chainId, blockNumber),
-                });
-              }
+              // wrap in a race here so that we never spend too long stuck on a block
+              Promise.race([
+                new Promise<void>((resolve) => {
+                  // add another 30s to process the block
+                  setTimeout(async () => {
+                    // set cancelled on the asyncParts obj we're passing through processBlock
+                    (await asyncParts).cancelled = true;
+                    // resolve to try again
+                    resolve();
+                  }, 30000); // max of 30s per block - we'll adjust if needed
+                }),
+                Promise.resolve().then(async () => {
+                  try {
+                    // attempt to process the block
+                    await processBlock(
+                      +chainId,
+                      validOps,
+                      blockNumber,
+                      collectBlocks,
+                      collectTxReceipts,
+                      silent,
+                      syncProviders,
+                      eventIfaces,
+                      latestEntity,
+                      callbacks,
+                      blocks.length,
+                      asyncParts
+                    );
+                    // record the new number
+                    if (!(await asyncParts).cancelled) {
+                      latestBlocks[+chainId] = {
+                        number: blockNumber,
+                      } as unknown as Block;
+                    } else {
+                      // reattempt the timedout block
+                      restack();
+                    }
+                  } catch {
+                    // reattempt the failed block
+                    restack();
+                  }
+                }),
+              ]);
             }
           });
         } else {

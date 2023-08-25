@@ -112,6 +112,13 @@ export class Stage extends DB {
     return Promise.resolve(true);
   }
 
+  // pop the last checkpoint and discard
+  revert() {
+    if (this.isCheckpoint) {
+      this.checkpoints.pop()!;
+    }
+  }
+
   // retrieves a raw value from leveldb or the latest checkpoint
   async get(key: string): Promise<Record<string, unknown> | null> {
     // lookup the value in our cache - we return the latest checkpointed value (which should be the value on disk)
