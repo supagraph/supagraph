@@ -1170,6 +1170,12 @@ export function createQuery(
               ...createArgs(args).$match,
             },
           }
+        : args?.id
+        ? {
+            $match: {
+              id: args?.id[0],
+            },
+          }
         : false,
       // set the pagination offsets and limits
       {
