@@ -2663,56 +2663,56 @@ const attachListeners = async (
       };
     }, {});
 
+  // pull all block and receipt details
+  const getBlockAndReceipts = async (chainId: number, blockNumber: number) => {
+    // get the full block details
+    const block = await getBlockByNumber(syncProviders[+chainId], blockNumber);
+
+    // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
+    const receipts = (
+      await Promise.all(
+        block.transactions.map(async function getReceipt(
+          tx: TransactionResponse
+        ) {
+          // this promise.all is trapped until we resolve all tx receipts in the block
+          try {
+            // get the receipt
+            const fullTx = await syncProviders[+chainId].getTransactionReceipt(
+              tx.hash
+            );
+            // try again
+            if (!fullTx.transactionHash) throw new Error("Missing hash");
+
+            // return the tx
+            return fullTx;
+          } catch {
+            // attempt to get receipt again on failure
+            return getReceipt(tx);
+          }
+        })
+      )
+    ).reduce((all, receipt) => {
+      // combine all receipts to create an indexed lookup obj
+      return {
+        ...all,
+        [receipt.transactionHash]: receipt,
+      };
+    }, {});
+
+    // return the block and all receipts in the block
+    return {
+      block,
+      receipts,
+    };
+  };
+
   // record the block for the given chainId
-  const recordBlock = (chainId: string, blockNumber: number) => {
+  const recordBlock = (chainId: number, blockNumber: number) => {
     blocks.push({
       chainId: +chainId,
       number: blockNumber,
       // start fetching these parts now, we will wait for them when we begin processing the blocks...
-      asyncParts: Promise.resolve().then(async () => {
-        // get the full block details
-        const block = await getBlockByNumber(
-          syncProviders[+chainId],
-          blockNumber
-        );
-
-        // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-        const receipts = (
-          await Promise.all(
-            block.transactions.map(async function getReceipt(
-              tx: TransactionResponse
-            ) {
-              // this promise.all is trapped until we resolve all tx receipts in the block
-              try {
-                // get the receipt
-                const fullTx = await syncProviders[
-                  +chainId
-                ].getTransactionReceipt(tx.hash);
-                // try again
-                if (!fullTx.transactionHash) throw new Error("Missing hash");
-
-                // return the tx
-                return fullTx;
-              } catch {
-                // attempt to get receipt again on failure
-                return getReceipt(tx);
-              }
-            })
-          )
-        ).reduce((all, receipt) => {
-          // combine all receipts to create an indexed lookup obj
-          return {
-            ...all,
-            [receipt.transactionHash]: receipt,
-          };
-        }, {});
-
-        // return the block and all receipts in the block
-        return {
-          block,
-          receipts,
-        };
-      }),
+      asyncParts: getBlockAndReceipts(+chainId, blockNumber),
     });
   };
 
@@ -2726,7 +2726,7 @@ const attachListeners = async (
           // push to the block stack to signal the block is retrievable
           if (state.listening) {
             // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
-            recordBlock(chainId, blockNumber);
+            recordBlock(+chainId, blockNumber);
           }
         };
         // attach this listener to onBlock to start collecting blocks
@@ -2762,7 +2762,7 @@ const attachListeners = async (
               while (blockNumber - latestBlocks[+chainId].number > 0) {
                 // push prev blocks
                 recordBlock(
-                  chainId.toString(10),
+                  chainId,
                   blockNumber - (blockNumber - latestBlocks[+chainId].number)
                 );
               }
@@ -2771,7 +2771,7 @@ const attachListeners = async (
             opened[blocks[0].chainId] = true;
           }
           // record the current process so that it can be awaited in remove listener logic
-          currentProcess = new Promise((resolve) => {
+          await Promise.resolve().then(async () => {
             // take the next block in the queue
             const [{ number: blockNumber, chainId, asyncParts }] =
               blocks.splice(0, 1);
@@ -2782,9 +2782,9 @@ const attachListeners = async (
               blockNumber >= startBlocks[+chainId] &&
               blockNumber >= latestBlocks[+chainId].number
             ) {
-              // await each valid block we take from the stack
-              resolve(
-                processBlock(
+              try {
+                // attempt to process the block
+                await processBlock(
                   +chainId,
                   validOps,
                   blockNumber,
@@ -2797,21 +2797,24 @@ const attachListeners = async (
                   callbacks,
                   blocks.length,
                   asyncParts
-                )
-              );
-              // record the new number
-              latestBlocks[+chainId] = {
-                number: blockNumber,
-              } as unknown as Block;
-            } else {
-              // block is being skipped - return from promise
-              resolve();
+                );
+                // record the new number
+                latestBlocks[+chainId] = {
+                  number: blockNumber,
+                } as unknown as Block;
+              } catch {
+                // restack this at the top so that we can try again
+                blocks.splice(0, 0, {
+                  number: blockNumber,
+                  chainId,
+                  // recreate the async parts to pull everything fresh
+                  asyncParts: getBlockAndReceipts(chainId, blockNumber),
+                });
+              }
             }
           });
-          // await the currentProccess
-          await currentProcess;
         } else {
-          // wait 1 second
+          // wait 1 second for something to enter the queue
           await new Promise((resolve) => {
             setTimeout(resolve, 1000);
           });
