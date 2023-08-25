@@ -2889,7 +2889,7 @@ const attachListeners = async (
                       // reattempt the timedout block
                       restack();
                     }
-                  } catch (e) {
+                  } catch {
                     // reattempt the failed block
                     restack();
                   }
