@@ -735,6 +735,9 @@ function createArgs(args: Record<string, any>) {
                   key.indexOf("_in") !== key.length - 3
                   ? // if we're putting an array as the where key then we're pushing an expr
                     {
+                      [hasFilter ? key.replace(filterKey, "") : key]: {
+                        $ne: null,
+                      },
                       $expr: query,
                     }
                   : {
