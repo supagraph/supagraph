@@ -4,7 +4,7 @@ export const withDefault = <T>(value: unknown, defaultValue: T) => {
   if (typeof defaultValue === "boolean" && typeof value === "string") {
     value = value === "true";
     // value is cast by check for "true"
-    return value;
+    return value as T;
   }
   // if the default is a number, parse value as int
   if (typeof defaultValue === "number" && typeof value === "string") {
