@@ -1173,7 +1173,8 @@ export function createQuery(
         : args?.id
         ? {
             $match: {
-              id: args?.id[0],
+              // arg will have been converter to a toString, convert back
+              id: args?.id[1],
             },
           }
         : false,
