@@ -94,18 +94,28 @@ export class Stage extends DB {
       // dump everything into the current (higher level) cache
       const currentKeyValueMap =
         this.checkpoints[this.checkpoints.length - 1].keyValueMap;
-      keyValueMap.forEach((value, key) =>
+      keyValueMap.forEach((value, key) => {
+        // collect current set
+        const currentSet = currentKeyValueMap.get(key) || [];
+        // drop the first entry if its null
+        if (currentSet[0] === null) {
+          currentSet.splice(0, 1);
+        }
+        // drop the first entry if its null
+        if (value[0] === null) {
+          value.splice(0, 1);
+        }
         // combine the current entries with the new entries (if !mutable there will only be 1 entry)
         currentKeyValueMap.set(
           key,
           [
             ...(!(this.db as unknown as { mutable: boolean }).mutable
-              ? currentKeyValueMap.get(key) || []
+              ? currentSet
               : []),
             ...value,
           ].filter((v) => v || v === null)
-        )
-      );
+        );
+      });
     }
 
     // completed the action - return true
@@ -170,6 +180,10 @@ export class Stage extends DB {
         key.indexOf("__meta__") !== -1
       ) {
         currentSet.pop();
+      }
+      // drop the first entry if its null
+      if (currentSet[0] === null) {
+        currentSet.splice(0, 1);
       }
       // put value in cache (this ensures we make only one write per key)
       this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(

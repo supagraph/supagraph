@@ -94,7 +94,7 @@ export class Mongo extends DB {
     const [ref, id] = key.split(".");
 
     // for valid reqs...
-    if (ref && id) {
+    if (ref && id && !this.engine.newDb) {
       // this wants to get only the most recent insertion
       return (await Promise.resolve(this.db))
         .collection(ref)

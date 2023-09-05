@@ -26,11 +26,6 @@ type Engine = {
 const engine: Engine = ((global as typeof global & { engine: Engine }).engine =
   (global as typeof global & { engine: Engine }).engine || {}); // should we default this to the memory db?
 
-// Entity store -- flat array of entity lookups keyed by ref-id - this will be backed by a levelDown like driver
-const entities: {
-  [ref: string]: Record<string, Entity<{ id: string }>>;
-} = {};
-
 // return all entities in the store (async because we'll change this logic to get entities from db)
 export const getEntities = async () => {
   // get the root db kv store
@@ -209,54 +204,36 @@ export class Store {
         name: "supagraph",
         db: new DB({}),
       });
-    // default the entity if missing
-    entities[ref] = entities[ref] || {};
     // return the Entity (as a clone or as a new entry (this isnt recorded into state until it is saved later))
-    return entities[ref][id]?.entries
-      ? // always return a new clone of the Entity to avoid mutation by ref
-        (new Entity<T>(
-          ref,
-          id,
-          // returning a clone of the typeMap array and each TypedMapEntry to prevent unexpected mutations
-          (
-            entities[ref][id].entries as TypedMapEntry<keyof T, T[keyof T]>[]
-          ).map((v) => new TypedMapEntry(v.key, v.value))
-        ) as Entity<T> & T)
-      : ((async () => {
-          let fromDb: T | boolean = false;
-          // attempt to pull from db...
-          try {
-            // pull from db (if not marked as a newId)
-            fromDb =
-              !newId &&
-              ((await engine?.stage?.get(`${toCamelCase(ref)}.${id}`)) as T);
-          } finally {
-            // eslint-disable-next-line no-unsafe-finally
-            return new Entity<T>(
-              ref,
-              id,
-              (!!fromDb &&
-                Object.keys(fromDb).map((key) => {
-                  return new TypedMapEntry(
-                    key as keyof T,
-                    (fromDb as T)[key as keyof T]
-                  );
-                })) ||
-                []
+    let fromDb: T | boolean = false;
+    // attempt to pull from db...
+    try {
+      // pull from db (if not marked as a newId)
+      fromDb =
+        !newId &&
+        ((await engine?.stage?.get(`${toCamelCase(ref)}.${id}`)) as T);
+    } finally {
+      // eslint-disable-next-line no-unsafe-finally
+      return new Entity<T>(
+        ref,
+        id,
+        (!!fromDb &&
+          Object.keys(fromDb).map((key) => {
+            return new TypedMapEntry(
+              key as keyof T,
+              (fromDb as T)[key as keyof T]
             );
-          }
-        })() as Promise<Entity<T> & T>);
+          })) ||
+          []
+      ) as Entity<T> & T;
+    }
   }
 
   static async set<T extends { id: string }>(
     ref: string,
     id: string,
-    value: Entity<T>
+    value: T
   ): Promise<void> {
-    // default the entity if missing
-    entities[ref] = entities[ref] || {};
-    // set the value
-    entities[ref][id] = value as Entity<T | { id: string }>;
     // put the value into the db
     await engine?.stage?.put(
       `${toCamelCase(ref)}.${id}`,
@@ -265,8 +242,6 @@ export class Store {
   }
 
   static async remove(ref: string, id: string) {
-    // clear the value
-    delete entities[`${ref}`][`${id}`];
     // del the value set from the db
     await engine?.stage?.del(`${toCamelCase(ref)}.${id}`);
   }

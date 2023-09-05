@@ -43,6 +43,7 @@ export enum Stage {
 export type Sync = {
   provider: JsonRpcProvider | WebSocketProvider;
   startBlock: number | "latest";
+  endBlock: number | "latest";
   eventName: string;
   address?: string;
   eventAbi?: ethers.Contract["abi"];
@@ -305,6 +306,7 @@ export function addSync<T extends Record<string, unknown>>(
     | {
         provider: JsonRpcProvider | WebSocketProvider;
         startBlock: number | "latest";
+        endBlock: number | "latest";
         eventName: string;
         onEvent: HandlerFn;
         address?: string;
@@ -316,6 +318,7 @@ export function addSync<T extends Record<string, unknown>>(
       },
   provider?: JsonRpcProvider | WebSocketProvider,
   startBlock?: number | "latest",
+  endBlock?: number | "latest",
   address?: string,
   eventAbi?: ethers.Contract["abi"],
   onEvent?: HandlerFn,
@@ -345,6 +348,7 @@ export function addSync<T extends Record<string, unknown>>(
       eventName: eventNameOrParams!,
       provider: provider!,
       startBlock: startBlock!,
+      endBlock: endBlock!,
       opts: opts || { collectTxReceipts: false, collectBlocks: false },
       onEvent: onEvent!,
     };
@@ -402,6 +406,7 @@ export const setSyncs = (config: SyncConfig, handlers: Handlers) => {
         eventAbi: events,
         address: syncOp.address,
         startBlock: syncOp.startBlock,
+        endBlock: syncOp.endBlock,
         provider: providerCache[rpcUrl],
         opts: {
           collectBlocks:
@@ -987,7 +992,7 @@ const cancelAndSplit =
           chainId,
           contract,
           event,
-          middle + 1,
+          middle,
           toBlock,
           reqStack,
           result,
@@ -1080,10 +1085,20 @@ const getNewEvents = async (
     await processPromiseQueue(stack);
   }
 
+  // dedupe on hash and logIndex
+  const all = Array.from(
+    new Map(
+      Array.from(result).map((val) => [
+        `${val.transactionHash}-${val.logIndex}`,
+        val,
+      ])
+    )
+  ).map((v) => v[1]);
+
   // wrap the events with the known type
   return wrapEventRes(
     eventName,
-    Array.from(result),
+    all,
     provider,
     toBlock,
     collectTxReceipt,
@@ -1540,6 +1555,7 @@ const getNewSyncEvents = async (
           eventName,
           provider,
           startBlock,
+          endBlock,
           opts,
           onEvent,
         } = opSync;
@@ -1577,7 +1593,9 @@ const getNewSyncEvents = async (
               latestEntity[chainId]?.latestBlock ||
               0;
             // toBlock is always "latest" from when we collected the events
-            latestBlocks[chainId] = await provider.getBlock("latest");
+            latestBlocks[chainId] = await provider.getBlock(
+              (!Number.isNaN(+endBlock) && +endBlock) || "latest"
+            );
 
             // when the db is locked check if it should be released before ending all operations
             if (
@@ -2158,6 +2176,8 @@ const processEvents = async (
 
     // iterate the sorted events and process the callbacks with the given args (sequentially)
     for (const opSorted of sorted) {
+      // create a checkpoint
+      engine?.stage?.checkpoint();
       // get an interface to parse the args
       const iface =
         eventIfaces[
@@ -2294,6 +2314,8 @@ const processEvents = async (
           }
         );
       }
+      // commit the checkpoint on the db...
+      await engine?.stage?.commit();
     }
 
     // print the number of processed events
@@ -2442,7 +2464,7 @@ const processBlock = async (
         callbacks[`${chainId}-${op.eventName}`]
       ) {
         // create a new event for every transaction in the block
-        for (const tx of block.transactions) {
+        for (const tx of block.transactions as TransactionResponse[]) {
           // record the event
           events.push({
             ...op,
@@ -2459,10 +2481,10 @@ const processBlock = async (
               ...tx,
               ...(collectTxReceipts || op.opts?.collectTxReceipts
                 ? receipts[tx.hash]
-                : {}),
+                : ({} as unknown as TransactionReceipt)),
             },
             // onTx first out of tx & events
-            txIndex: tx.transactionIndex,
+            txIndex: receipts[tx.hash].transactionIndex,
             logIndex: -1,
           });
         }
@@ -2475,16 +2497,19 @@ const processBlock = async (
         const topic = iface.getEventTopic(op.eventName);
         const hasEvent =
           isTopicInBloom(block.logsBloom, topic) &&
-          isContractAddressInBloom(block.logsBloom, op.address);
+          isContractAddressInBloom(block.logsBloom, getAddress(op.address));
 
         // check for logs on the block
         if (hasEvent) {
           // now we need to find the transaction that created this logEvent
-          for (const tx of block.transactions) {
+          for (const tx of block.transactions as TransactionResponse[]) {
             // check if the tx has the event...
             const txHasEvent =
               isTopicInBloom(receipts[tx.hash].logsBloom, topic) &&
-              isContractAddressInBloom(receipts[tx.hash].logsBloom, op.address);
+              isContractAddressInBloom(
+                receipts[tx.hash].logsBloom,
+                getAddress(op.address)
+              );
             // check for logs on the tx
             if (txHasEvent) {
               // check each log for a match
@@ -2514,10 +2539,10 @@ const processBlock = async (
                       ...tx,
                       ...(collectTxReceipts || op.opts?.collectTxReceipts
                         ? receipts[tx.hash]
-                        : {}),
+                        : ({} as unknown as TransactionReceipt)),
                     },
                     // order as defined
-                    txIndex: tx.transactionIndex,
+                    txIndex: receipts[tx.hash].transactionIndex,
                     logIndex:
                       typeof log.logIndex === "undefined"
                         ? (log as any).index
@@ -2585,7 +2610,7 @@ const processBlock = async (
         await engine?.stage?.commit();
       } else {
         // clear the promiseQueue
-        promiseQueue.slice(0, promiseQueue.length);
+        promiseQueue.splice(0, promiseQueue.length);
         // revert this checkpoint we're not saving it
         engine?.stage?.revert();
       }
