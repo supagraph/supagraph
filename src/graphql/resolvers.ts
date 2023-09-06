@@ -11,7 +11,12 @@ import {
 
 import { DB } from "../sync/db";
 import { toCamelCase } from "../utils/toCamelCase";
-import { generateIndexes, createQuery, unwindResult } from "./mongo";
+import {
+  generateIndexes,
+  createQuery,
+  unwindResult,
+  createMaterialisedViews,
+} from "./mongo";
 
 // Filter key content to only the named fields (no plural field information)
 export const filteredKeys = (schema: SimpleSchema) => {
@@ -129,10 +134,75 @@ export function mongoResolver({
         // console.log("doing entity", entity, context?.result);
         // no result means we're on the root leaf of the query, extract all intel from the AST and query mongo for everything all-at-once...
         if (!context?.result) {
+          // if we have a prequery then it now to construct views
+          const prequery = createMaterialisedViews(
+            schema,
+            entity,
+            mutable,
+            ast
+          );
+          // run through any views that need to be created
+          if (Object.values(prequery).length) {
+            // pull the meta collection to look for our last snapshot entry
+            const meta = mongo.collection("__meta__");
+            // only processing for immutable collections referenced in this query
+            await Promise.all(
+              // dedupe so that we only process the snapshots once per collection
+              Object.values(prequery).map(async (query) => {
+                // check when we last ran the snapshot update here
+                const lastUpdate = meta.find({
+                  snapshot: query.collection,
+                  $expr: {
+                    $gte: ["$last_update", { $subtract: ["$$NOW", 12000] }],
+                  },
+                });
+                // check for the most recent update
+                const recentUpdate = await lastUpdate.toArray();
+
+                // check that we have a recent update before updating
+                if (!recentUpdate.length) {
+                  // connect to the entity collection
+                  const collection = mongo.collection(query.collection); // if mutable use `${entity}_snapshot`
+                  // get the result from the complete query
+                  const result = collection.aggregate(query.aggregate, {
+                    // allow sort on disk (we probably don't need this if we can live without the timewalk groupBy on block_ts_')
+                    allowDiskUse: true,
+                    // force sorts to use numericOrdering on number-like-id's (this matches the manual sorts we build in ./queries)
+                    collation: {
+                      locale: "en_US",
+                      numericOrdering: true,
+                    },
+                  });
+                  // run the aggs to set snapshot collection
+                  await result.toArray();
+                  // update the snapshot meta entry with current date
+                  await meta.updateOne(
+                    {
+                      snapshot: query.collection,
+                    },
+                    {
+                      $currentDate: {
+                        last_update: { $type: "date" },
+                      },
+                      $set: {
+                        snapshot: query.collection,
+                      },
+                    },
+                    {
+                      upsert: true,
+                    }
+                  );
+                }
+              })
+            );
+          }
           // we walk the AST through all args and all fields and recreate a mongo query to request all the information required to satisfy the query the one request
           const query = createQuery(schema, entity, mutable, ast, context);
+
           // connect to the entity collection
-          const collection = mongo.collection(toCamelCase(entity));
+          const collection = mongo.collection(
+            `${toCamelCase(entity)}${!mutable ? "_snapshot" : ""}`
+          );
           // get the result from the complete query
           const result = collection.aggregate(query, {
             // allow sort on disk (we probably don't need this if we can live without the timewalk groupBy on block_ts_')

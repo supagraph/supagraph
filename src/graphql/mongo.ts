@@ -789,7 +789,9 @@ function createLookup(
     // this needs to be recursive to keep the full tree rendered
     return {
       $lookup: {
-        from: toCamelCase(vals.type.replace(/\[|\]|!/g, "")),
+        from:
+          toCamelCase(vals.type.replace(/\[|\]|!/g, "")) +
+          (!mutable ? "_snapshot" : ""),
         // supply the outer join field to the lookup pipeline
         let: {
           joinOn:
@@ -1002,6 +1004,91 @@ export function generateIndexes(schema: SimpleSchema, entity: string) {
   return indexes;
 }
 
+// construct a set of calls to be made to build materialisedViews
+export function createMaterialisedViews(
+  schema: SimpleSchema,
+  entity: string,
+  mutable: boolean,
+  ast: any,
+  usePath?: string,
+  useMap?: MapResult
+): Record<string, { collection: string; aggregate: unknown[] }> {
+  // only run for mutable calls
+  if (!mutable) {
+    // should be indexed in the schema - we can use this to guide the query joins
+    const map = useMap || fieldsMap(ast);
+
+    // extract top-level args/fields from map
+    const fields = fieldsList(ast, { map, path: usePath });
+
+    // extract fields by type
+    const entityFields = getValues(schema, entity, false) || [];
+
+    // extract any additional fields defined in the args.where that might not be defined in the response query
+    const argFields = collateWheres(schema, entity, ast, usePath, map);
+
+    // for each entity on the query we need to create a join...
+    return {
+      ...Array.from(new Set([...entityFields, ...argFields]))
+        // exclude any fields not mentioned in the query
+        .filter(
+          (v) =>
+            v && (fields.indexOf(v.name) !== -1 || argFields.indexOf(v) !== -1)
+        )
+        // map the lookup keeping track of the dotDelim path of the parent entity
+        .reduce((all, vals) => {
+          // dot-delim path of current entity
+          const path = entity ? `${entity}.${vals.name}` : vals.name;
+          // this needs to be recursive to keep the full tree rendered (but we should push items to an injected array)
+          all[toCamelCase(vals.type.replace(/\[|\]|!/g, ""))] = {
+            collection: toCamelCase(vals.type.replace(/\[|\]|!/g, "")),
+            aggregate: [
+              {
+                $sort: {
+                  _block_ts: -1,
+                },
+              },
+              {
+                $group: {
+                  _id: "$id",
+                  latestDocument: {
+                    $first: "$$ROOT",
+                  },
+                },
+              },
+              {
+                $replaceRoot: { newRoot: "$latestDocument" },
+              },
+              {
+                $merge: {
+                  into: `${toCamelCase(
+                    vals.type.replace(/\[|\]|!/g, "")
+                  )}_snapshot`,
+                },
+              },
+            ],
+          };
+
+          // collate all
+          return {
+            ...all,
+            // collect from next level (following path)
+            ...createMaterialisedViews(
+              schema,
+              entity,
+              mutable,
+              ast,
+              path || "",
+              map
+            ),
+          };
+        }, {} as Record<string, { collection: string; aggregate: unknown[] }>),
+    };
+  }
+
+  return {};
+}
+
 // Construct the mongo query that will pull all documents to fulfill the graphql query
 export function createQuery(
   schema: SimpleSchema,
@@ -1049,98 +1136,60 @@ export function createQuery(
     useArgStore
   );
 
+  // construct filter
+  const filter = [
+    args?.where
+      ? {
+          $match: {
+            // place the match for descending checks
+            ...createArgs(args).$match,
+          },
+        }
+      : args?.id
+      ? {
+          $match: {
+            // arg will have been converted to a toString, convert back
+            id: args?.id[1],
+          },
+        }
+      : false,
+    // set the pagination offsets and limits
+    {
+      $skip: parseInt(
+        (Array.isArray(args?.skip) ? args?.skip[1] : args?.skip) || "0",
+        10
+      ),
+    },
+    {
+      $limit: Math.min(
+        500,
+        parseInt(
+          (Array.isArray(args?.first) ? args?.first[1] : args?.first) || "25",
+          10
+        ) || 25
+      ),
+    },
+  ];
+
   // collate the aggregates starting from the root entity
   aggregates.push(
     ...([
       // perform the match before the sort and groupBy to limit matches
-      mutable && useMatch?.$match
+      useMatch?.$match
         ? {
             $match: useMatch?.$match,
           }
         : false,
-      // if the ids are updated then we need to groupBy on the id sorted by block/time
-      ...(!mutable
-        ? [
-            {
-              $sort: {
-                // use block_ts as primary sort before grouping and limiting to first result of each id
-                _block_ts: -1,
-              },
-            },
-            {
-              $group: {
-                _id: "$id",
-                // include all values here to inform the joins later
-                [`latestDocument${toCamelCase(
-                  (usePath || "").replace(/\./g, "-")
-                )}`]: {
-                  $first: "$$ROOT",
-                },
-              },
-            },
-            {
-              // we're projecting everything being requested at this level on this entity
-              $project: {
-                _id: 1,
-                // if we're performing a lookup then we need to add the projected "derivedFrom" for the graphql internals to unwind against
-                ...(extraProjection
-                  ? {
-                      [extraProjection]: `$latestDocument${toCamelCase(
-                        (usePath || "").replace(/\./g, "-")
-                      )}.${extraProjection}`,
-                    }
-                  : {}),
-                // we combine any fields mentioned for this entity in this or any parent arg.where aswell as everything we know we want for this req
-                ...[
-                  ...valueFields,
-                  ...Array.from(new Set([...argFields, ...entityFields])),
-                ]
-                  .filter(
-                    (v) =>
-                      v &&
-                      (fields.indexOf(v.name) !== -1 ||
-                        v.type === "ID" ||
-                        argFields.indexOf(v) !== -1)
-                  )
-                  .reduce((carr, vals) => {
-                    return {
-                      ...carr,
-                      [vals.name]: `$latestDocument${toCamelCase(
-                        (usePath || "").replace(/\./g, "-")
-                      )}.${vals.name}`,
-                    };
-                  }, {} as Record<string, any>),
-              },
-            },
-            {
-              // sort after grouping (this is likely more expensive because we're sorting on a projection - hopefully the filter has limited the items enough)
-              $sort: {
-                // use given sort and direction
-                [(Array.isArray(args?.orderBy)
-                  ? args?.orderBy[1]
-                  : args?.orderBy) || "id"]:
-                  args.orderDirection === "desc" ? -1 : 1,
-              },
-            },
-          ]
-        : [
-            {
-              // sort the items before performing lookups/matches to make sure we're using the index
-              $sort: {
-                // use given sort and direction or default to id (to keep it consistent)
-                [(Array.isArray(args?.orderBy)
-                  ? args?.orderBy[1]
-                  : args?.orderBy) || "id"]:
-                  args.orderDirection === "desc" ? -1 : 1,
-              },
-            },
-          ]),
-      // perform the match after the sort and groupBy to make sure we're working against the requested set
-      !mutable && useMatch?.$match
-        ? {
-            $match: useMatch?.$match,
-          }
-        : false,
+      // sort the items before performing lookups/matches to make sure we're using the index
+      {
+        $sort: {
+          // use given sort and direction or default to id (to keep it consistent)
+          [(Array.isArray(args?.orderBy) ? args?.orderBy[1] : args?.orderBy) ||
+          "id"]: args.orderDirection === "desc" ? -1 : 1,
+        },
+      },
+      // argFields (because the args can filter on descendents we need to do this after the join which sucks.)
+      ...(!argFields.length ? filter : []),
       // for each entity on the query we need to create a join...
       ...Array.from(new Set([...entityFields, ...argFields]))
         // exclude any fields not mentioned in the query
@@ -1162,38 +1211,8 @@ export function createQuery(
             (useArgStore[toCamelCase(entity)] || {}) as Record<string, unknown>
           )
         ),
-      // args (because the args can filter on descendents we need to do this after the join which sucks.)
-      args?.where
-        ? {
-            $match: {
-              // place the match for descending checks
-              ...createArgs(args).$match,
-            },
-          }
-        : args?.id
-        ? {
-            $match: {
-              // arg will have been converted to a toString, convert back
-              id: args?.id[1],
-            },
-          }
-        : false,
-      // set the pagination offsets and limits
-      {
-        $skip: parseInt(
-          (Array.isArray(args?.skip) ? args?.skip[1] : args?.skip) || "0",
-          10
-        ),
-      },
-      {
-        $limit: Math.min(
-          500,
-          parseInt(
-            (Array.isArray(args?.first) ? args?.first[1] : args?.first) || "25",
-            10
-          ) || 25
-        ),
-      },
+      // this means we're querying based on a nested match
+      ...(argFields.length ? filter : []),
       // project all fields that are being requested in the output
       ...(!mutable
         ? [

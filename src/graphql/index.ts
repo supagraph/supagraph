@@ -318,8 +318,9 @@ export const createSupagraph = <
                         return (
                           item &&
                           caseInsensitiveMatch(
-                            typeof item[key.derivedFrom] === "object"
-                              ? (item[key.derivedFrom] as { id: string }).id
+                            item[key.derivedFrom] &&
+                              typeof item[key.derivedFrom] === "object"
+                              ? (item[key.derivedFrom] as { id: string })?.id
                               : (item[key.derivedFrom] as string),
                             parent as string | { id: string }
                           )
