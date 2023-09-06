@@ -1064,6 +1064,9 @@ export function createMaterialisedViews(
                   into: `${toCamelCase(
                     vals.type.replace(/\[|\]|!/g, "")
                   )}_snapshot`,
+                  on: "id",
+                  whenMatched: "replace",
+                  whenNotMatched: "insert",
                 },
               },
             ],
