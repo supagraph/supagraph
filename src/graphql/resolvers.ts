@@ -162,17 +162,9 @@ export function mongoResolver({
                 // check that we have a recent update before updating
                 if (!recentUpdate.length) {
                   // connect to the entity collection
-                  const collection = mongo.collection(query.collection); // if mutable use `${entity}_snapshot`
+                  const collection = mongo.collection(query.collection);
                   // get the result from the complete query
-                  const result = collection.aggregate(query.aggregate, {
-                    // allow sort on disk (we probably don't need this if we can live without the timewalk groupBy on block_ts_')
-                    allowDiskUse: true,
-                    // force sorts to use numericOrdering on number-like-id's (this matches the manual sorts we build in ./queries)
-                    collation: {
-                      locale: "en_US",
-                      numericOrdering: true,
-                    },
-                  });
+                  const result = collection.aggregate(query.aggregate);
                   // run the aggs to set snapshot collection
                   await result.toArray();
                   // update the snapshot meta entry with current date
