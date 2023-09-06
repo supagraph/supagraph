@@ -1059,12 +1059,18 @@ export function createMaterialisedViews(
               {
                 $replaceRoot: { newRoot: "$latestDocument" },
               },
+              // we need the _id to be unique but represent the item
+              {
+                $addFields: {
+                  _id: "$id",
+                },
+              },
               {
                 $merge: {
                   into: `${toCamelCase(
                     vals.type.replace(/\[|\]|!/g, "")
                   )}_snapshot`,
-                  on: "id",
+                  on: "_id",
                   whenMatched: "replace",
                   whenNotMatched: "insert",
                 },
