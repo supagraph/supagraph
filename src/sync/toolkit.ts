@@ -1137,12 +1137,12 @@ const attemptFnCall = async <T extends Record<string, any>>(
           syncProviders[dets.chainId].connection.url,
         ])[fn](dets.data[prop] as string) as unknown as Promise<T>)
     )
-      .then((resData: T) => {
+      .then(async (resData: T) => {
         // if we have data...
         if (resData && resData[resProp]) {
           clearTimeout(timer);
           // write the file
-          saveJSON(
+          await saveJSON(
             type,
             `${dets.chainId}-${
               type === "blocks"
@@ -1593,9 +1593,8 @@ const getNewSyncEvents = async (
               latestEntity[chainId]?.latestBlock ||
               0;
             // toBlock is always "latest" from when we collected the events
-            latestBlocks[chainId] = await provider.getBlock(
-              (!Number.isNaN(+endBlock) && +endBlock) || "latest"
-            );
+            latestBlocks[chainId] =
+              latestBlocks[chainId] || (await provider.getBlock("latest"));
 
             // when the db is locked check if it should be released before ending all operations
             if (
@@ -1689,7 +1688,9 @@ const getNewSyncEvents = async (
             start = "blocks";
           }
           // set the block frame (go back a block as a safety check (1 confirmation))
-          const toBlock = +latestBlocks[chainId].number - 1;
+          const toBlock =
+            (!Number.isNaN(+endBlock) && +endBlock) ||
+            +latestBlocks[chainId].number - 1;
           const fromBlock =
             +latestEntity[chainId].latestBlock + 1 ||
             (startBlock === "latest"
@@ -2207,15 +2208,7 @@ const processEvents = async (
             : await readJSON<TransactionReceipt>(
                 "transactions",
                 `${opSorted.chainId}-${opSorted.data.transactionHash}`
-              ).then(async (file) => {
-                if (cleanup) {
-                  await deleteJSON(
-                    "transactions",
-                    `${opSorted.chainId}-${opSorted.data.transactionHash}`
-                  );
-                }
-                return file;
-              });
+              );
         // block can also be summised from opSorted if were not collecting blocks for this run
         const block =
           !collectBlocks && !opSorted.collectBlock
