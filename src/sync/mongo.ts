@@ -8,7 +8,7 @@ import { DB } from "./db";
 type KV = Record<string, Record<string, Record<string, unknown> | null>>;
 
 // Error to throw with a .notFound prop set to true
-class NotFound extends Error {
+export class NotFound extends Error {
   notFound: boolean;
 
   constructor(msg: string) {
@@ -111,13 +111,16 @@ export class Mongo extends DB {
 
     // for valid reqs...
     if (ref && id) {
+      // resolve db promise layer
+      const db = await Promise.resolve(this.db);
       // get the collection for this entity
-      const collection = (await Promise.resolve(this.db)).collection(ref);
-      // get the most recent document that matches the id
-      const document = collection.findOne(
+      const collection = db.collection(ref);
+
+      // this will update the most recent entry or upsert a new document (do we want this to insert a new doc every update?)
+      await collection.replaceOne(
         {
           id,
-          // if ids are unique then we can place by update
+          // if ids are unique then we can place by update by checking for a match on current block setup
           ...(this.mutable || ref === "__meta__"
             ? {}
             : {
@@ -126,18 +129,8 @@ export class Mongo extends DB {
                 _chain_id: val?._chain_id,
               }),
         },
-        { sort: { _block_ts: -1 } }
-      );
-
-      // this will update the most recent entry or upsert a new document (do we want this to insert a new doc every update?)
-      await (await Promise.resolve(this.db)).collection(ref).updateOne(
-        {
-          ...(document || {}),
-          id,
-        },
-        {
-          $set: val,
-        },
+        // the replacement values
+        val,
         {
           upsert: true,
         }
@@ -205,7 +198,7 @@ export class Mongo extends DB {
           // Put operation operates on the id + block to upsert a new entity entry
           if (val.type === "put") {
             operations.push({
-              updateOne: {
+              replaceOne: {
                 filter: {
                   // each entry is unique by block and id
                   id: val.key.split(".")[1],
@@ -218,26 +211,25 @@ export class Mongo extends DB {
                         _chain_id: val.value?._chain_id,
                       }),
                 },
-                update: {
-                  $set: {
-                    // ignore the _id key because this will cause an error in mongo
-                    ...Object.keys(val.value || {}).reduce((carr, key) => {
-                      return {
-                        ...carr,
-                        // add everything but the _id
-                        ...(key !== "_id"
-                          ? {
-                              [key]: val.value?.[key],
-                            }
-                          : {}),
-                      };
-                    }, {} as Record<string, unknown>),
-                    // add block details to the insert (this is what makes it an insert - every event should insert a new document)
-                    _block_ts: val.value?._block_ts,
-                    _block_num: val.value?._block_num,
-                    _chain_id: val.value?._chain_id,
-                  },
+                replacement: {
+                  // ignore the _id key because this will cause an error in mongo
+                  ...Object.keys(val.value || {}).reduce((carr, key) => {
+                    return {
+                      ...carr,
+                      // add everything but the _id
+                      ...(key !== "_id"
+                        ? {
+                            [key]: val.value?.[key],
+                          }
+                        : {}),
+                    };
+                  }, {} as Record<string, unknown>),
+                  // add block details to the insert (this is what makes it an insert - every event should insert a new document)
+                  _block_ts: val.value?._block_ts,
+                  _block_num: val.value?._block_num,
+                  _chain_id: val.value?._chain_id,
                 },
+                // insert new entry if criteria isnt met
                 upsert: true,
               },
             });

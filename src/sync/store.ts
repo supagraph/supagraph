@@ -197,7 +197,7 @@ export class Store {
     ref: string,
     id: string,
     newId: boolean = false
-  ) {
+  ): Promise<Entity<T> & T> {
     // if we attempt to use this without an engine then prepare one now...
     if (!engine.db)
       await setEngine({
