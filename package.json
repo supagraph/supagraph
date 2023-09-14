@@ -1,6 +1,6 @@
 {
   "name": "supagraph",
-  "version": "0.0.1-rc.24",
+  "version": "0.0.1-rc.25",
   "author": "grezle",
   "license": "MIT",
   "description": "RPC indexer and GraphQL server",

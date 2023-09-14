@@ -146,7 +146,9 @@ export const where = (entity: string, keys: Key[]) => {
             (filter: string) =>
               `\n    ${name}${filter}: ${
                 // if we're checking any sort of "in" then we do it against an array of options
-                filter.indexOf("_in") !== -1 ? "[String]" : "String"
+                filter.indexOf("_in") !== -1 || filter.indexOf("_not") !== -1
+                  ? "[String]"
+                  : "String"
               }`
           )
           .join("")

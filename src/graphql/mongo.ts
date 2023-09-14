@@ -671,7 +671,7 @@ function collateWheres(
       ] ||
       args?.where?.[key.name] ||
       Object.keys(graphqlToMongoOperatorMap)
-        .map((arg) => entity + arg)
+        .map((arg) => key.name + arg)
         .find((argKey) => args?.where?.[argKey])
     ) {
       argWheres[key.type.replace(/\[|\]|!/g, "")] = key;
@@ -734,12 +734,24 @@ function createArgs(args: Record<string, any>) {
                   !Array.isArray(query) &&
                   key.indexOf("_in") !== key.length - 3
                   ? // if we're putting an array as the where key then we're pushing an expr
-                    {
-                      [hasFilter ? key.replace(filterKey, "") : key]: {
-                        $ne: null,
-                      },
-                      $expr: query,
-                    }
+                    (query as { $ne: unknown })?.$ne &&
+                    Array.isArray((query as { $ne: unknown[] }).$ne) &&
+                    (query as { $ne: unknown[] }).$ne.length === 0
+                    ? {
+                        [`${useKey ? `${useKey}.` : ``}${
+                          hasFilter ? key.replace(filterKey, "") : key
+                        }`]: {
+                          $ne: [],
+                        },
+                      }
+                    : {
+                        [`${useKey ? `${useKey}.` : ``}${
+                          hasFilter ? key.replace(filterKey, "") : key
+                        }`]: {
+                          $ne: null,
+                        },
+                        $expr: query,
+                      }
                   : {
                       [`${useKey ? `${useKey}.` : ``}${
                         hasFilter ? key.replace(filterKey, "") : key
