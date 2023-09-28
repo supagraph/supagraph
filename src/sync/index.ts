@@ -14,5 +14,10 @@ export {
   processPromiseQueue,
 } from "./toolkit";
 
-// Set up configs and syncs (types)
-export type { Handlers, SyncConfig, Stage } from "./toolkit";
+// Export all other shared types
+export type {
+  Handlers,
+  SyncConfig,
+  SyncStage,
+  SyncStage as Stage,
+} from "./types";

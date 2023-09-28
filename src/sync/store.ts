@@ -3,7 +3,7 @@ import { Block } from "@ethersproject/providers";
 
 import { BigNumber } from "ethers";
 import { TypedMap } from "./typedMap";
-import { TypedMapEntry } from "./typepMapEntry";
+import { TypedMapEntry } from "./typedMapEntry";
 
 // Store can use either in-memory or mongo as a driver
 import { DB } from "./db";
@@ -11,20 +11,19 @@ import { Stage } from "./stage";
 
 // convert collection refs to toCamelCase
 import { toCamelCase } from "../utils/toCamelCase";
-
-type Engine = {
-  name?: string;
-  db?: DB;
-  stage?: Stage;
-  chainId?: number;
-  block?: Block;
-  newDb?: boolean;
-  lastUpdate?: number;
-};
+import { Engine } from "./types";
 
 // create a global to store in-memory engine for duration of request
 const engine: Engine = ((global as typeof global & { engine: Engine }).engine =
-  (global as typeof global & { engine: Engine }).engine || {}); // should we default this to the memory db?
+  (global as typeof global & { engine: Engine }).engine || {
+    events: [],
+    block: {},
+    opSyncs: {},
+    callbacks: {},
+    eventAbis: {},
+    eventIfaces: {},
+    startBlocks: {},
+  });
 
 // return all entities in the store (async because we'll change this logic to get entities from db)
 export const getEntities = async () => {
@@ -168,11 +167,7 @@ export class Entity<T extends { id: string }> extends TypedMap<
         this.set("_chain_id" as keyof T, this.chainId as T[keyof T]);
       }
       // replace the current entry with the new one
-      await Store.set(
-        this.ref,
-        id,
-        this.valueOf() as unknown as Entity<{ id: string }>
-      );
+      await Store.set(this.ref, id, this.valueOf() as unknown as T);
     }
 
     // return a new copy of the saved entity (without fetching from db again)
@@ -262,14 +257,14 @@ export class Store {
   }
 
   static setBlock(block: Block) {
-    engine.block = block;
+    engine.block[engine.chainId] = block;
   }
 
   static clearBlock() {
-    engine.block = undefined;
+    engine.block[engine.chainId] = undefined;
   }
 
   static getBlock() {
-    return engine.block;
+    return engine.block[engine.chainId];
   }
 }

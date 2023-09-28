@@ -1,5 +1,5 @@
 // Each types entry holds a <gernerically> typed key => value pair
-import { TypedMapEntry } from "./typepMapEntry";
+import { TypedMapEntry } from "./typedMapEntry";
 
 // throw error if condition isnt met
 const assert = (condition: boolean, error: string) => {

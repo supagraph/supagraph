@@ -130,7 +130,7 @@ export class Stage extends DB {
   }
 
   // retrieves a raw value from leveldb or the latest checkpoint
-  async get(key: string): Promise<Record<string, unknown> | null> {
+  async get(key: string) {
     // lookup the value in our cache - we return the latest checkpointed value (which should be the value on disk)
     for (let index = this.checkpoints.length - 1; index >= 0; index -= 1) {
       const values = this.checkpoints[index].keyValueMap.get(key);
@@ -144,10 +144,11 @@ export class Stage extends DB {
     if (!this.db.engine?.newDb) {
       // nothing has been found in cache, look up from disk
       const value = await this.db.get(key);
-      if (this.isCheckpoint) {
+      // we only want to checkpoint full lookups (not ref lookups)
+      if (key && this.isCheckpoint && key.split(".").length !== 1) {
         // since we are in a checkpoint, put this value in cache, so future `get` calls will not look the key up again from disk (this could be null)
         this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(key, [
-          value,
+          value as Record<string, unknown>,
         ]);
       }
       return value;

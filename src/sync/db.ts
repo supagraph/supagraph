@@ -20,9 +20,9 @@ export const cwd =
 export class DB {
   kv: KV;
 
-  store?: Promise<Storage>;
-
   engine?: { newDb: boolean } & Record<string, unknown>;
+
+  useStorage?: boolean;
 
   // construct a kv store
   constructor(kv: KV, engine?: { newDb: boolean } & Record<string, unknown>) {
@@ -52,29 +52,32 @@ export class DB {
     name,
     reset,
   }: { kv: KV; name?: string; reset?: boolean } & Record<string, unknown>) {
+    // use given kv
     const kvs = { ...kv };
     // init the localStorage mechanism
-    await Storage.init({
+    await Storage?.init?.({
       // dump this with the rest of the .next artifacts to be periodically reclaimed?
       dir: `${cwd}${name || "supagraph"}-node-persist-storage`,
     });
     // clear the db between runs to move back to the start
     if (reset) {
-      await Storage.clear();
+      await Storage?.clear?.();
     }
     // restore given kv
-    const keys = await Storage.keys();
+    const keys = await Storage?.keys?.();
     if (keys.length) {
       // eslint-disable-next-line no-restricted-syntax
       for (const key of keys) {
         const [ref, id] = key.split(".");
         // eslint-disable-next-line no-await-in-loop
-        const val = await Storage.get(key);
+        const val = await Storage?.get?.(key);
 
         kvs[ref] = kvs[ref] || {};
         kvs[ref][id] = val;
       }
     }
+    // mark as storage enabled
+    this.useStorage = true;
 
     // restore the kv;
     this.kv = kvs;
@@ -86,16 +89,19 @@ export class DB {
 
     if (ref && id) {
       // console.log(`getting ${key}`);
-      const val = this.kv[ref]?.[id]; // we might want to split this key on the "." and store into collections here for in-memory graphql'ing
+      const val = this.kv[ref]?.[id];
 
       // return the value
       if (val) return val;
-
-      // retrieve from storage
-      const cached = await Storage.get(key);
-
-      if (cached) return cached;
     }
+    if (ref) {
+      // console.log(`getting ${ref}`);
+      const val = this.kv[ref];
+
+      // return the collection
+      if (val) return Object.values(val);
+    }
+
     return null;
   }
 
@@ -111,7 +117,7 @@ export class DB {
       this.kv[ref][id] = val;
 
       // set into cache
-      await Storage.set(key, val);
+      if (this.useStorage) await Storage?.set?.(key, val);
 
       return true;
     }
@@ -131,7 +137,7 @@ export class DB {
       delete this.kv[ref][id];
 
       // clear from storage
-      await Storage.del(key);
+      if (this.useStorage) await Storage?.del?.(key);
 
       return true;
     }
@@ -157,12 +163,12 @@ export class DB {
           // console.log(`batch - putting: ${val.key} val:`, val.value);
           this.kv[ref][id] = val.value;
           // set into cache
-          await Storage.set(val.key, val.value);
+          if (this.useStorage) await Storage?.set?.(val.key, val.value);
         } else if (val.type === "del") {
           // console.log(`batch - delete ${val.key}`);
           delete this.kv[ref][id];
           // clear from storage
-          await Storage.del(val.key);
+          if (this.useStorage) await Storage?.del?.(val.key);
         }
       })
     );
