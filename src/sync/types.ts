@@ -27,6 +27,7 @@ export type Engine = {
   db?: DB;
   stage?: Stage;
   syncing?: boolean;
+  error?: unknown;
   chainId?: number;
   block?: Record<number, Block>;
   newDb?: boolean;
@@ -53,6 +54,7 @@ export type Engine = {
     cleanup?: boolean;
     silent?: boolean;
   };
+  close?: (() => Promise<void>) | undefined;
   appendEvents?: (events: SyncEvent[], silent?: boolean) => Promise<void>;
 };
 

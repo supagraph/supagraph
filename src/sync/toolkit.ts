@@ -281,6 +281,9 @@ export async function addSync<T extends Record<string, unknown>>(
 
   // if appendEvents is defined, then we're inside a sync op
   if (engine.syncing && typeof engine.appendEvents === "function") {
+    // associate chainId with the store incase we're associating cross-chain
+    Store.setChainId(params.chainId);
+
     // pull all syncs to this point
     const { events } = await getNewSyncEvents(
       [params],
@@ -2399,20 +2402,6 @@ const processBlock = async (
   collectBlocks: boolean,
   collectTxReceipts: boolean,
   silent: boolean,
-  config: SyncConfig | undefined,
-  handlers: {
-    reject?: (reason?: any) => void;
-    resolve?: (value: void | PromiseLike<void>) => void;
-  },
-  syncOpsEntity:
-    | (Entity<{
-        id: string;
-        syncOps: SyncOp[];
-      }> & {
-        id: string;
-        syncOps: SyncOp[];
-      })
-    | false,
   migrations: Record<string, Migration[]>,
   migrationEntities: Record<string, Record<number, Promise<{ id: string }[]>>>,
   queueLength: number,
@@ -2420,6 +2409,17 @@ const processBlock = async (
     cancelled?: boolean;
     block: BlockWithTransactions & any;
     receipts: Record<string, TransactionReceipt>;
+    syncOpsEntity: {
+      current:
+        | (Entity<{
+            id: string;
+            syncOps: SyncOp[];
+          }> & {
+            id: string;
+            syncOps: SyncOp[];
+          })
+        | false;
+    };
   }>
 ) => {
   // open a checkpoint on the db...
@@ -2466,7 +2466,7 @@ const processBlock = async (
   const parts = await asyncParts;
 
   // unpack the async parts  - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-  const { block, receipts, cancelled } = parts;
+  const { block, receipts, cancelled, syncOpsEntity } = parts;
 
   // set the chainId into the engine
   Store.setChainId(chainId);
@@ -2759,9 +2759,12 @@ const processBlock = async (
         engine?.stage?.checkpoint();
 
         // update with any new syncOps added in the sync
-        if (config && handlers && syncOpsEntity) {
+        if (engine.handlers && syncOpsEntity.current) {
           // record the new syncs to db (this will replace the current entry)
-          await recordSyncsOpsMeta(syncOpsEntity, engine.syncs);
+          syncOpsEntity.current = await recordSyncsOpsMeta(
+            syncOpsEntity.current,
+            engine.syncs
+          );
         }
 
         // update the startBlock
@@ -2794,11 +2797,10 @@ const attachListeners = async (
     inSync: true,
     listening: true,
   },
-  handlers: {
+  errorHandlers: {
     reject?: (reason?: any) => void;
     resolve?: (value: void | PromiseLike<void>) => void;
   } = undefined,
-  config: SyncConfig = undefined,
   migrations: Migration[] = [],
   syncOpsEntity:
     | (Entity<{
@@ -2824,6 +2826,7 @@ const attachListeners = async (
       cancelled?: boolean;
       block: BlockWithTransactions;
       receipts: Record<string, TransactionReceipt>;
+      syncOpsEntity: { current: typeof syncOpsEntity };
     }>;
     asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
   }[] = [];
@@ -2849,6 +2852,11 @@ const attachListeners = async (
 
   // record the current process so that we can await its completion on close of listener
   let currentProcess: Promise<void>;
+
+  // place inside a wrapper to update by mutations
+  const syncOpsEntityWrapper = {
+    current: syncOpsEntity,
+  };
 
   // restructure ops into ops by chainId
   const validOps: () => Promise<Record<number, Sync[]>> = async () => {
@@ -2884,6 +2892,7 @@ const attachListeners = async (
       cancelled?: boolean;
       block: BlockWithTransactions;
       receipts: Record<string, TransactionReceipt>;
+      syncOpsEntity: { current: typeof syncOpsEntity };
     }>([
       new Promise((resolve) => {
         setTimeout(async () => {
@@ -2892,6 +2901,7 @@ const attachListeners = async (
               cancelled: true,
               block: {} as BlockWithTransactions,
               receipts: {} as Record<string, TransactionReceipt>,
+              syncOpsEntity: syncOpsEntityWrapper,
             });
           }
         }, 60000); // max of 60s per block - we'll adjust if needed
@@ -2941,6 +2951,7 @@ const attachListeners = async (
         return {
           block,
           receipts,
+          syncOpsEntity: syncOpsEntityWrapper,
         };
       }),
     ]);
@@ -3086,9 +3097,6 @@ const attachListeners = async (
                       collectBlocks,
                       collectTxReceipts,
                       silent,
-                      config,
-                      handlers,
-                      syncOpsEntity,
                       indexedMigrations,
                       asyncEntities,
                       blocks.length,
@@ -3121,8 +3129,8 @@ const attachListeners = async (
     })
     .catch((e) => {
       // reject propagation and close
-      if (handlers?.reject) {
-        handlers.reject(e);
+      if (errorHandlers?.reject) {
+        errorHandlers.reject(e);
       }
     });
 
@@ -3258,7 +3266,7 @@ export const sync = async ({
   listen = false,
   cleanup = false,
   silent = false,
-  onError = async (reset) => {
+  onError = async (_, reset) => {
     // reset the locks by default
     await reset();
   },
@@ -3279,7 +3287,7 @@ export const sync = async ({
   start?: keyof typeof SyncStage | false;
   stop?: keyof typeof SyncStage | false;
   // process errors (should close connection)
-  onError?: (close: () => Promise<void>) => Promise<void>;
+  onError?: (e: unknown, close: () => Promise<void>) => Promise<void>;
 } = {}) => {
   // record when we started this operation
   const startTime = performance.now();
@@ -3289,20 +3297,12 @@ export const sync = async ({
 
   // lock the engine for syncing
   engine.syncing = true;
+  // no error yet...
+  engine.error = false;
   // collect each events abi iface
   engine.eventIfaces = {};
   // collect the block we start collecting from
   engine.startBlocks = {};
-  // set the run flags into the engine
-  engine.flags = {
-    listen,
-    cleanup,
-    silent,
-    start,
-    stop,
-    collectBlocks,
-    collectTxReceipts,
-  };
 
   // pointer to the meta document containing current set of syncs
   let syncOpsMeta: Entity<{
@@ -3323,14 +3323,17 @@ export const sync = async ({
   };
 
   // set the initial sync object
-  if (config && handlers) {
+  if (Object.keys(engine.handlers).length || Object.keys(handlers).length) {
     // if config is provided, we can source our syncs from db
     syncOpsMeta = await getSyncsOpsMeta();
 
     // set the syncs into the engines syncs config
     if (syncOpsMeta.syncOps && syncOpsMeta.syncOps.length) {
       // place the handlers into the engine
-      engine.handlers = handlers;
+      engine.handlers =
+        !handlers && Object.keys(engine.handlers).length
+          ? engine.handlers
+          : handlers || {};
 
       // assign this set of syncs in to the engine
       engine.syncs = (
@@ -3381,11 +3384,11 @@ export const sync = async ({
         all.push(...collection);
         return all;
       }, []);
-    } else {
+    } else if (config && handlers) {
       // start a new syncs object
       engine.syncs = [];
       // set the config against engine.syncs
-      setSyncs(config, handlers, engine.syncs);
+      await setSyncs(config, handlers, engine.syncs);
     }
 
     // record the new syncs to db (this will replace the current entry)
@@ -3411,6 +3414,17 @@ export const sync = async ({
   collectTxReceipts = config
     ? config.collectTxReceipts ?? collectTxReceipts
     : collectTxReceipts;
+
+  // set the run flags into the engine
+  engine.flags = {
+    listen,
+    cleanup,
+    silent,
+    start,
+    stop,
+    collectBlocks,
+    collectTxReceipts,
+  };
 
   // attempt to pull the latest data
   try {
@@ -3492,7 +3506,6 @@ export const sync = async ({
           const attached = await attachListeners(
             controls,
             errorHandler,
-            config,
             migrations,
             syncOpsMeta,
             collectBlocks,
@@ -3530,7 +3543,12 @@ export const sync = async ({
           };
 
           // attach errors and pass to handler to close the connection
-          errorPromise.catch(async () => onError(close));
+          errorPromise.catch(async (e) => {
+            // assign error for just-in-case
+            engine.error = e;
+            // chain error through user handler
+            return onError(e, close);
+          });
 
           // return close to allow external closure
           return close;
@@ -3626,7 +3644,8 @@ export const sync = async ({
       // if we're starting the process here then print the discovery
       if (
         !silent &&
-        (!start || (start && SyncStage[start] < SyncStage.process))
+        (!start || (start && SyncStage[start] < SyncStage.process)) &&
+        migrationCount > 0
       ) {
         // detail everything which was loaded in this run
         console.log(
@@ -3637,7 +3656,7 @@ export const sync = async ({
       }
     }
 
-    // set the processEvent against the engine to allow
+    // set the processEvent against the engine to allow events to be appended during runtime
     engine.appendEvents = async (prcEvents: SyncEvent[], opSilent: boolean) => {
       // get all chainIds for defined networks
       const { syncProviders: currentSyncProviders } = await getNetworks();
@@ -3660,7 +3679,7 @@ export const sync = async ({
         engine.flags.stop
       );
 
-      // add new events
+      // add new events to the current set (by mutation)
       engine.events.push(...prcEvents);
 
       // sort the events into processing order (no changes to engine.events after this point)
@@ -3687,9 +3706,9 @@ export const sync = async ({
       stop
     );
     // update with any new syncOps added in the sync
-    if (config && handlers && syncOpsMeta) {
+    if (engine.handlers && syncOpsMeta) {
       // record the new syncs to db (this will replace the current entry)
-      await recordSyncsOpsMeta(syncOpsMeta, engine.syncs);
+      syncOpsMeta = await recordSyncsOpsMeta(syncOpsMeta, engine.syncs);
     }
 
     // record when we finished the sync operation
@@ -3705,6 +3724,9 @@ export const sync = async ({
 
     // place in the microtask queue to open listeners after we return the sync summary and close fn
     if (listen) {
+      // attach close mech to engine
+      engine.close = async () => listeners[0]();
+      // open after a tick to start after returning catchup summary response
       setTimeout(() => {
         // open the listener queue for resolution
         controls.inSync = true;
@@ -3750,9 +3772,12 @@ export const sync = async ({
         {}),
     } as SyncResponse;
   } catch (e: any) {
+    // assign error to engine
+    engine.error = e;
+
     // process error by releasing the locks
     if (e.toString() !== "DB is locked") {
-      await onError(async () => {
+      await onError(e, async () => {
         await releaseSyncPointerLocks(chainIds);
       });
     }

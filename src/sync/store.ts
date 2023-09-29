@@ -77,7 +77,9 @@ export class Entity<T extends { id: string }> extends TypedMap<
   constructor(
     ref: string,
     id: string,
-    entries: Array<TypedMapEntry<keyof T, T[keyof T]>>
+    entries: Array<TypedMapEntry<keyof T, T[keyof T]>>,
+    block?: Block,
+    chainId?: number
   ) {
     super();
     // record ref for saving to store later
@@ -86,14 +88,9 @@ export class Entity<T extends { id: string }> extends TypedMap<
     // set the entities if and as provided
     if (entries) this.entries = entries;
 
-    // pull the block
-    const block = Store.getBlock();
-    // pull the chainID
-    const chainId = Store.getChainId();
-
     // update block and chain details when provided
-    this.block = block;
-    this.chainId = chainId || 0;
+    this.block = block ?? Store.getBlock();
+    this.chainId = chainId ?? Store.getChainId() ?? 0;
 
     // place getters and setters directly onto the instance to expose vals (this is the `T &` section of the type)
     [...this.entries, new TypedMapEntry("id", id)].forEach((kv) => {
@@ -121,9 +118,21 @@ export class Entity<T extends { id: string }> extends TypedMap<
     return this as this & Entity<T> & T;
   }
 
-  // return a copy of the instance (this will renew the associated block and chain)
-  async copy(newId: boolean = false) {
-    return Store.get<T>(this.ref, this.id, newId);
+  copy(id?: string) {
+    const thisId = id || (this.getEntry("id" as keyof T)?.value as string);
+    return new Entity<T>(
+      this.ref,
+      thisId,
+      this.entries.map(
+        (entry) =>
+          new TypedMapEntry<typeof entry.key, typeof entry.value>(
+            entry.key,
+            entry.value
+          )
+      ),
+      this.block,
+      this.chainId
+    ) as Entity<T> & T;
   }
 
   set<K extends keyof T>(key: K, value: T[K]): void {
@@ -171,17 +180,7 @@ export class Entity<T extends { id: string }> extends TypedMap<
     }
 
     // return a new copy of the saved entity (without fetching from db again)
-    return new Entity<T>(
-      this.ref,
-      id,
-      this.entries.map(
-        (entry) =>
-          new TypedMapEntry<typeof entry.key, typeof entry.value>(
-            entry.key,
-            entry.value
-          )
-      )
-    ) as Entity<T> & T;
+    return this.copy(id);
   }
 }
 
