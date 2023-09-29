@@ -50,6 +50,7 @@ module.exports = {
     'styles',
     'coverage',
     'dist',
+    'tests',
     '.turbo',
   ],
   root: true,

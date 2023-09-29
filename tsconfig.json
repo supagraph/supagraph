@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "types": ["node"],
+    "types": ["node", "jest"],
     "declaration": true,
     "strict": false,
     "skipLibCheck": true,

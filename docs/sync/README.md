@@ -16,7 +16,7 @@ To get started with `supagraph`, follow these steps:
 
 Syncs are the heart of `supagraph` as an indexer, we use syncs to handle the processing of an `event` as we see it happen onchain.
 
-`Supagraph` is configured to run these syncs periodically in a "catch-up" fashion to allow RPC usage to be both deterministic and configurable.
+By default `Supagraph` is configured to run these syncs periodically in a "catch-up" fashion to allow RPC usage to be both deterministic and configurable, however we can also run in `listen` mode to catch and analyse every block as it becomes available.
 
 Some layer2 chains are producing a huge number of blocks and its getting more and more expensive to obtain a full history in a reasonable time-frame, to ease this pain, `supagraph` offers several options to cut down on the amount of data we need to obtain in order to produce our data-store, but these are wholly dependent on the use-case and carry significant trade-offs, we explain more about these options in the sections below.
 
