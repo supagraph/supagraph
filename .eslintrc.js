@@ -51,6 +51,7 @@ module.exports = {
     'coverage',
     'dist',
     'tests',
+    'examples',
     '.turbo',
   ],
   root: true,
