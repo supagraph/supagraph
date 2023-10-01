@@ -85,13 +85,24 @@ export class Mongo extends DB {
 
   // get from mongodb
   async get(key: string) {
-    // short-cut the response - we're not storing anything here internally to avoid mem-issues
-    if (this.kv[key]) {
-      return this.kv[key];
-    }
-
     // otherwise spit the key and get from mongo
     const [ref, id] = key.split(".");
+
+    // check in runtime cache
+    if (ref && id) {
+      // console.log(`getting ${key}`);
+      const val = this.kv[ref]?.[id];
+
+      // return the value
+      if (val) return val;
+    }
+    if (ref) {
+      // console.log(`getting ${ref}`);
+      const val = this.kv[ref];
+
+      // return the collection
+      if (val) return Object.values(val);
+    }
 
     // for valid reqs...
     if (ref && id && !this.engine.newDb) {
@@ -99,6 +110,17 @@ export class Mongo extends DB {
       return (await Promise.resolve(this.db))
         .collection(ref)
         .findOne({ id }, { sort: { _block_ts: -1 } });
+    }
+    // for valid reqs...
+    if (ref && !this.engine.newDb) {
+      // this wants to get only the most recent insertion
+      return (
+        (await Promise.resolve(this.db))
+          .collection(ref)
+          // if we're in immutable mode we should sort and group
+          .find({})
+          .toArray()
+      );
     }
 
     throw new NotFound("Not Found");
@@ -109,8 +131,14 @@ export class Mongo extends DB {
     // spit the key and get from mongo
     const [ref, id] = key.split(".");
 
+    // default the collection
+    this.kv[ref] = this.kv[ref] || {};
+
     // for valid reqs...
     if (ref && id) {
+      // console.log(`putting ${key}`, val);
+      this.kv[ref][id] = val;
+
       // resolve db promise layer
       const db = await Promise.resolve(this.db);
       // get the collection for this entity
@@ -145,8 +173,13 @@ export class Mongo extends DB {
     // spit the key and get from mongo
     const [ref, id] = key.split(".");
 
+    // default the collection
+    this.kv[ref] = this.kv[ref] || {};
+
     // for valid reqs...
     if (ref && id) {
+      // remove from local-cache
+      delete this.kv[ref][id];
       // get the collection for this entity
       const collection = (await Promise.resolve(this.db)).collection(ref);
       // this will delete the latest entry - do we want to delete all entries??
@@ -184,6 +217,8 @@ export class Mongo extends DB {
       // only collect true values
       if (val.type === "del" || val?.value) {
         collected[ref].push(val);
+        // make sure the store exists to cache values into
+        this.kv[ref] = this.kv[ref] || {};
       }
 
       return collected;
@@ -197,6 +232,26 @@ export class Mongo extends DB {
         byCollection[collection].reduce((operations, val) => {
           // Put operation operates on the id + block to upsert a new entity entry
           if (val.type === "put") {
+            // construct replacement value set
+            const replacement = {
+              // ignore the _id key because this will cause an error in mongo
+              ...Object.keys(val.value || {}).reduce((carr, key) => {
+                return {
+                  ...carr,
+                  // add everything but the _id
+                  ...(key !== "_id"
+                    ? {
+                        [key]: val.value?.[key],
+                      }
+                    : {}),
+                };
+              }, {} as Record<string, unknown>),
+              // add block details to the insert (this is what makes it an insert - every event should insert a new document)
+              _block_ts: val.value?._block_ts,
+              _block_num: val.value?._block_num,
+              _chain_id: val.value?._chain_id,
+            };
+            // push operation for bulkwrite
             operations.push({
               replaceOne: {
                 filter: {
@@ -211,28 +266,13 @@ export class Mongo extends DB {
                         _chain_id: val.value?._chain_id,
                       }),
                 },
-                replacement: {
-                  // ignore the _id key because this will cause an error in mongo
-                  ...Object.keys(val.value || {}).reduce((carr, key) => {
-                    return {
-                      ...carr,
-                      // add everything but the _id
-                      ...(key !== "_id"
-                        ? {
-                            [key]: val.value?.[key],
-                          }
-                        : {}),
-                    };
-                  }, {} as Record<string, unknown>),
-                  // add block details to the insert (this is what makes it an insert - every event should insert a new document)
-                  _block_ts: val.value?._block_ts,
-                  _block_num: val.value?._block_num,
-                  _chain_id: val.value?._chain_id,
-                },
+                replacement,
                 // insert new entry if criteria isnt met
                 upsert: true,
               },
             });
+            // store in to local-cache
+            this.kv[collection][val.key.split(".")[1]] = replacement;
           }
           // del will delete ALL entries from the collection (this shouldnt need to be called - it might be wiser to insert an empty entry than to try to delete anything)
           if (val.type === "del") {
@@ -241,6 +281,8 @@ export class Mongo extends DB {
                 filter: { id: val.key.split(".")[1] },
               },
             });
+            // delete the value from cache
+            delete this.kv[collection][val.key.split(".")[1]];
           }
           // returns all Document operations
           return operations;
