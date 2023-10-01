@@ -2739,12 +2739,22 @@ const processBlock = async (
         // only attempt to save changes when the queue is clear (or it has been 15s since we last stored changes)
         if (
           queueLength === 0 ||
-          (engine?.lastUpdate || 0) + 15000 <= new Date().getTime()
+          ((engine?.lastUpdate || 0) + 15000 <= new Date().getTime() &&
+            queueLength < 1000)
         ) {
           // mark after we end the processing
           if (!silent) {
             process.stdout.write(`✔\nEntities stored `);
           }
+          // update with any new syncOps added in the sync
+          if (engine.handlers && syncOpsEntity.current) {
+            // record the new syncs to db (this will replace the current entry)
+            syncOpsEntity.current = await recordSyncsOpsMeta(
+              syncOpsEntity.current,
+              engine.syncs
+            );
+          }
+
           // commit the checkpoint on the db...
           await engine?.stage?.commit();
 
@@ -2753,18 +2763,6 @@ const processBlock = async (
 
           // update the lastUpdateTime (we have written everything to db - wait a max of 15s before next update)
           engine.lastUpdate = new Date().getTime();
-        }
-
-        // open checkpoint on the db...
-        engine?.stage?.checkpoint();
-
-        // update with any new syncOps added in the sync
-        if (engine.handlers && syncOpsEntity.current) {
-          // record the new syncs to db (this will replace the current entry)
-          syncOpsEntity.current = await recordSyncsOpsMeta(
-            syncOpsEntity.current,
-            engine.syncs
-          );
         }
 
         // update the startBlock
@@ -2777,9 +2775,6 @@ const processBlock = async (
           true,
           []
         );
-
-        // final commit the checkpoint on the db...
-        await engine?.stage?.commit();
 
         // finished after updating pointers
         if (!silent) process.stdout.write(`✔\n`);
