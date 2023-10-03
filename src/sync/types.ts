@@ -34,6 +34,10 @@ export type Engine = {
   warmDb?: boolean;
   lastUpdate?: number;
   syncs?: Sync[];
+  promiseQueue?: (
+    | Promise<unknown>
+    | ((stack?: (() => Promise<any>)[]) => Promise<unknown>)
+  )[];
   providers?: Record<number, Record<number, providers.JsonRpcProvider>>;
   extraProviders?: string[];
   eventAbis?: Record<string, ethers.Contract["abi"]>;

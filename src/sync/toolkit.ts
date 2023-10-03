@@ -3415,6 +3415,8 @@ export const sync = async ({
   engine.error = false;
   // collect the block we start collecting from
   engine.startBlocks = {};
+  // assign the mutable promiseQueue to engine directly
+  engine.promiseQueue = promiseQueue;
 
   // collect each events abi iface
   engine.eventIfaces = engine.eventIfaces ?? {};
