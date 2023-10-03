@@ -6,7 +6,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // Export the complete supagraph configuration (sync & graph)
-const config = {
+export const config = {
   // name your supagraph (this will inform mongo table name etc...)
   name: withDefault(
     process.env.SUPAGRAPH_NAME,

@@ -58,6 +58,7 @@ export const setEngine = async ({
       engine.db.engine = engine as { newDb: boolean };
     }
   }
+  return engine;
 };
 
 // Each distinct kv entity - exposed via Store.get<T> - fully typed according to T

@@ -31,6 +31,7 @@ export type Engine = {
   chainId?: number;
   block?: Record<number, Block>;
   newDb?: boolean;
+  warmDb?: boolean;
   lastUpdate?: number;
   syncs?: Sync[];
   providers?: Record<number, Record<number, providers.JsonRpcProvider>>;
@@ -61,7 +62,7 @@ export type Engine = {
 // Defines a migration handler
 export type Migration = {
   chainId: number;
-  blockNumber: number;
+  blockNumber: number | "latest";
   // collect all items for the entity
   entity?: string;
   // run the handler against every entity
@@ -81,6 +82,8 @@ export type SyncOp = {
   // for network listeners we only need start and endblock
   startBlock: number | "latest";
   endBlock: number | "latest";
+  // mark as added by runtime
+  mode?: string;
   // Establish all event signatures available on this contract (we could also accept a .sol or .json file here)
   events?: string | string[];
   // the event this op relates to
@@ -106,6 +109,7 @@ export type Sync = {
   address?: string;
   eventAbi?: ethers.Contract["abi"];
   opts?: {
+    mode?: string;
     collectBlocks?: boolean;
     collectTxReceipts?: boolean;
   };
@@ -188,6 +192,7 @@ export type SyncEvent = {
   args?: ethers.utils.Result;
   tx?: TransactionReceipt & TransactionResponse;
   txIndex?: number;
+  onEvent?: Migration["handler"];
 };
 
 // Handlers definition, to map handlers to contracts

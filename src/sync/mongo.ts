@@ -43,7 +43,8 @@ export class Mongo extends DB {
     mutable?: boolean,
     engine?: { newDb: boolean } & Record<string, unknown>
   ) {
-    super(kv);
+    // init super
+    super(kv, engine);
     // establish connection
     this.client = client;
     // record the connection name
@@ -65,22 +66,32 @@ export class Mongo extends DB {
     kv,
     mutable,
     engine,
+    reset,
   }: {
     client: MongoClient | Promise<MongoClient>;
     name: string;
     kv: KV;
     mutable?: boolean;
-    engine?: { newDb: boolean } & Record<string, unknown>;
+    engine?: { newDb: boolean; warmDb: boolean } & Record<string, unknown>;
+    reset?: boolean;
   } & Record<string, unknown>) {
     const db = new this(client, name, kv, mutable, engine);
-    await db.update({ kv });
+    await db.update({ kv, name, reset });
     return db;
   }
 
   // update the kv store with a new set of values
-  async update({ kv }: { kv: KV }) {
-    // restore given kv
-    this.kv = kv || {};
+  async update({
+    kv,
+    name,
+    reset,
+  }: { kv: KV; name?: string; reset?: boolean } & Record<string, unknown>) {
+    // await the update on super
+    return super.update({
+      kv,
+      name,
+      reset,
+    });
   }
 
   // get from mongodb
@@ -96,31 +107,82 @@ export class Mongo extends DB {
       // return the value
       if (val) return val;
     }
-    if (ref) {
-      // console.log(`getting ${ref}`);
-      const val = this.kv[ref];
 
-      // return the collection
-      if (val) return Object.values(val);
-    }
-
-    // for valid reqs...
-    if (ref && id && !this.engine.newDb) {
+    // for valid single entry get...
+    if (
+      ref &&
+      id &&
+      !this.engine.newDb &&
+      (!this.engine.warmDb || ref === "__meta__")
+    ) {
       // this wants to get only the most recent insertion
       return (await Promise.resolve(this.db))
         .collection(ref)
         .findOne({ id }, { sort: { _block_ts: -1 } });
     }
-    // for valid reqs...
-    if (ref && !this.engine.newDb) {
-      // this wants to get only the most recent insertion
+
+    // for valid entry reqs (used in migrations)...
+    if (
+      ref &&
+      !id &&
+      !this.engine.newDb &&
+      (!this.engine.warmDb || ref === "__meta__")
+    ) {
+      // update the materialised view for immutable collection...
+      if (!this.mutable && ref !== "__meta__") {
+        (await Promise.resolve(this.db)).collection(ref).aggregate([
+          {
+            $sort: {
+              _block_ts: -1,
+            },
+          },
+          {
+            $group: {
+              _id: "$id",
+              latestDocument: {
+                $first: "$$ROOT",
+              },
+            },
+          },
+          {
+            $replaceRoot: { newRoot: "$latestDocument" },
+          },
+          // we need the _id to be unique but represent the item
+          {
+            $addFields: {
+              _id: "$id",
+            },
+          },
+          {
+            $merge: {
+              into: `${ref}_snapshot`,
+              on: "_id",
+              whenMatched: "replace",
+              whenNotMatched: "insert",
+            },
+          },
+        ]);
+      }
+
+      // this wants to get only the most recent insertions
       return (
         (await Promise.resolve(this.db))
-          .collection(ref)
-          // if we're in immutable mode we should sort and group
+          // if we're immutable then get from the materialised view
+          .collection(
+            ref + (!this.mutable && ref !== "__meta__" ? "_snapshot" : "")
+          )
           .find({})
           .toArray()
       );
+    }
+
+    // can get all from kv store
+    if (ref && !id) {
+      // console.log(`getting ${ref}`);
+      const val = this.kv[ref];
+
+      // return the collection
+      if (val) return Object.values(val);
     }
 
     throw new NotFound("Not Found");

@@ -59,7 +59,7 @@ export class DB {
       // dump this with the rest of the .next artifacts to be periodically reclaimed?
       dir: `${cwd}${name || "supagraph"}-node-persist-storage`,
     });
-    // clear the db between runs to move back to the start
+    // clear the db between runs to move back to the start/to renew connection between external db and interal
     if (reset) {
       await Storage?.clear?.();
     }
@@ -79,12 +79,12 @@ export class DB {
     // mark as storage enabled
     this.useStorage = true;
 
-    // restore the kv;
+    // restore the kv store
     this.kv = kvs;
   }
 
   async get(key: string) {
-    // spit the key and get from mongo
+    // spit the key and get from kv store
     const [ref, id] = key.split(".");
 
     if (ref && id) {
@@ -94,7 +94,7 @@ export class DB {
       // return the value
       if (val) return val;
     }
-    if (ref) {
+    if (ref && !id) {
       // console.log(`getting ${ref}`);
       const val = this.kv[ref];
 
@@ -106,7 +106,7 @@ export class DB {
   }
 
   async put(key: string, val: Record<string, unknown>) {
-    // spit the key and get from mongo
+    // spit the key and get from kv store
     const [ref, id] = key.split(".");
 
     // default the collection
@@ -126,7 +126,7 @@ export class DB {
   }
 
   async del(key: string) {
-    // spit the key and get from mongo
+    // spit the key and get from kv store
     const [ref, id] = key.split(".");
 
     // default the collection

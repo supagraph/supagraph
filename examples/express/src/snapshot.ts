@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 
 // Use config to id mongodb connection
-import config from "@supagraph/config";
+import { config } from "@supagraph/config";
 import { withDefault } from "supagraph";
 
 // Import client generator

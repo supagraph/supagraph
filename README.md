@@ -5,14 +5,16 @@ Supagraph is an open-source toolkit for building efficient cross-chain indexes f
 ## Features
 
 - ✅ - Index multiple chains with a single service
-- ✅ - `onBlock`/`onTransaction` and log `event` handlers in typescript (side-effects allowed)
+- ✅ - `onBlock` / `onTransaction` and log `event` handlers in typescript (with side-effects)
 - ✅ - Fast initial load and reloads using `queryFilters` and a local cache
+- ✅ - Handle `async` messages in the `sync` process to be awaited later (non-blocking `async` handling of sequential processes)
 - ✅ - Sync as a daemon or on a schedule
-- ✅ - Support for migrations and factory contracts
+- ✅ - Support for migrations, factory contracts and recovery scripts
 - ✅ - Easy to deploy anywhere with minimal configuration
 - ✅ - Efficient `graphql` -> `mongo` querying for cheap data storage and retrieval
 - ✅ - Immutable storage option to snapshot state at any block (immutable by default)
-- 🏗️ - Code/type generators and subgraph migration guides
+- 🏗️ - Code / type generators and subgraph migration guides
+- 🏗️ - Postgres / other database adapters and resolvers
 - 🏗️ - Dashboard ui with sync monitoring and admin controls
 - 🏗️ - Chain reconciles and reorganisations handling
 
@@ -35,7 +37,7 @@ To install `supagraph`, go to an empty folder, initialise a pnpm project (i.e. `
 
 We are depending on:
 
-- `graphql-yoga` to create a GraphQL endpoint
+- `graphql-yoga` and `graphql` to create a GraphQL endpoint
 - `ethers` to map `Events` to stored `Entities`
 - `mongodb`/`node-persist` as a persistence layer
 - `typescript`, `eslint`, and `prettier` to maintain coding standards

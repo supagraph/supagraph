@@ -53,10 +53,6 @@ export type DelegateEntity = {
   mntTo: string;
   bitTo: string;
   l2MntTo: string;
-  // @DEPRECATED - balance checks are expensive to maintain - we don't want to record ALL L2 balances, so we opt to store none
-  // balance: BigNumber;
-  // mntBalance: BigNumber;
-  // bitBalance: BigNumber;
   l2MntBalance: BigNumber;
   votes: BigNumber;
   mntVotes: BigNumber;
