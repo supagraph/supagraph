@@ -140,12 +140,18 @@ export class Stage extends DB {
       }
     }
 
-    // if this is a newDb (we're starting the collection from startBlock) then we can skip looking up the item in the db (it won't be there)
+    // if this is a newDb or we have a warm cache then we can skip looking up the item in the db
     if (!this.db.engine?.newDb) {
       // nothing has been found in cache, look up from disk
       const value = await this.db.get(key);
       // we only want to checkpoint full lookups (not ref lookups)
-      if (key && this.isCheckpoint && key.split(".").length !== 1) {
+      if (
+        key &&
+        this.isCheckpoint &&
+        key.split(".").length !== 1 &&
+        // no need to prep checkpoint if cache is warm unless we're getting a __meta__ entry
+        (!this.db.engine?.warmDb || key.split(".")[0] === "__meta__")
+      ) {
         // since we are in a checkpoint, put this value in cache, so future `get` calls will not look the key up again from disk (this could be null)
         this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(key, [
           value as Record<string, unknown>,

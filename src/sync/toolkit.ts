@@ -2212,16 +2212,22 @@ const processEvents = async (
       // create a checkpoint
       engine?.stage?.checkpoint();
 
-      // process the callback for the given type
-      await processCallback(
-        opSorted,
-        {
-          cancelled: false,
-          block: false,
-          receipts: {},
-        },
-        processed
-      );
+      // wrap in try catch so that we don't leave any checkpoints open
+      try {
+        // process the callback for the given type
+        await processCallback(
+          opSorted,
+          {
+            cancelled: false,
+            block: false,
+            receipts: {},
+          },
+          processed
+        );
+      } catch (e) {
+        // log any errors from handlers - this should probably halt execution
+        console.log(e);
+      }
 
       // commit the checkpoint on the db...
       await engine?.stage?.commit();
