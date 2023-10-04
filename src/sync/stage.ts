@@ -50,28 +50,37 @@ export class Stage extends DB {
     if (!this.isCheckpoint && keyValueMap.size) {
       // this was the final checkpoint, we should now commit and flush everything to disk
       const batchOp: BatchDBOp[] = [];
+      // convert the keyValueMap into a collection of entries grouped by chainId+blockNum
       keyValueMap.forEach((values, key) => {
-        if (key.indexOf("__meta__") === -1) {
-          values.forEach((value, index) => {
+        // for every other key except for __meta__...
+        if (key.indexOf("__meta__.") !== 0) {
+          // record only one entry per block for each chainId each commit
+          const recorded = [];
+          // check each latest entry by block-number/chainId combo into the batch
+          values.reverse().forEach((value, index) => {
             // only delete on last entry
             if (
               value === null &&
               // check that this isnt a null insert from our first read of the db for an empty key
               ((this.db as unknown as { mutable: boolean }).mutable ||
                 (!(this.db as unknown as { mutable: boolean }).mutable &&
-                  index > 0 &&
-                  index === values.length - 1))
+                  values.length > 0 &&
+                  index === 0))
             ) {
               batchOp.push({
                 key,
                 type: "del",
               });
-            } else if (value) {
+            } else if (
+              value &&
+              recorded.indexOf(`${value._chain_id}-${value._block_num}`) === -1
+            ) {
               batchOp.push({
                 key,
                 type: "put",
                 value,
               });
+              recorded.push(`${value._chain_id}-${value._block_num}`);
             }
           });
         } else if (values.length && values[values.length - 1] === null) {
@@ -94,6 +103,7 @@ export class Stage extends DB {
       // dump everything into the current (higher level) cache
       const currentKeyValueMap =
         this.checkpoints[this.checkpoints.length - 1].keyValueMap;
+      // combine parent set and current set
       keyValueMap.forEach((value, key) => {
         // collect current set
         const currentSet = currentKeyValueMap.get(key) || [];
@@ -144,15 +154,17 @@ export class Stage extends DB {
     if (!this.db.engine?.newDb) {
       // nothing has been found in cache, look up from disk
       const value = await this.db.get(key);
-      // we only want to checkpoint full lookups (not ref lookups)
+      // we only want to checkpoint on lookup...
       if (
-        key &&
+        // when we're inside a checkpoint already,,,
         this.isCheckpoint &&
-        key.split(".").length !== 1 &&
-        // no need to prep checkpoint if cache is warm unless we're getting a __meta__ entry
-        (!this.db.engine?.warmDb || key.split(".")[0] === "__meta__")
+        // and the key is valid...
+        key &&
+        key.indexOf(".") !== -1 &&
+        // and we're not attempting to get values from a fully warm db (unless we're looking up on the __meta__ table)
+        (!this.db.engine?.warmDb || key.indexOf("__meta__.") === 0)
       ) {
-        // since we are in a checkpoint, put this value in cache, so future `get` calls will not look the key up again from disk (this could be null)
+        // since we are in a checkpoint, put this value in cache, future `get` calls will not look the key up again from disk (this could be null)
         this.checkpoints[this.checkpoints.length - 1].keyValueMap.set(key, [
           value as Record<string, unknown>,
         ]);
@@ -184,7 +196,7 @@ export class Stage extends DB {
             }
           )?._block_num === val?._block_num) ||
         // we can always pop for __meta__ entries (these don't need to be immutable ever)
-        key.indexOf("__meta__") !== -1
+        key.indexOf("__meta__.") === 0
       ) {
         currentSet.pop();
       }

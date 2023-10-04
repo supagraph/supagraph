@@ -104,12 +104,12 @@ export const getProvider = async (chainId: number) => {
 // get a block and all transaction responses
 const getBlockByNumber = async (
   provider: JsonRpcProvider | WebSocketProvider,
-  blockNumber: number
+  blockNumber: number | "latest"
 ): Promise<BlockWithTransactions & any> => {
   try {
     // fetch block by hex number passing true to fetch all transaction responses
     const block = await provider.send("eth_getBlockByNumber", [
-      `0x${blockNumber.toString(16)}`,
+      blockNumber === "latest" ? "latest" : `0x${blockNumber.toString(16)}`,
       true,
     ]);
     // check the block holds data
@@ -2227,6 +2227,8 @@ const processEvents = async (
       } catch (e) {
         // log any errors from handlers - this should probably halt execution
         console.log(e);
+        // throw the error again
+        throw e;
       }
 
       // commit the checkpoint on the db...
@@ -2326,10 +2328,13 @@ const processCallback = async (
     // make sure we've correctly discovered an iface
     if (iface) {
       // extract the args
-      const { args } = iface.parseLog({
-        topics: event.data.topics,
-        data: event.data.data,
-      });
+      const { args } =
+        typeof event.args === "object"
+          ? event
+          : iface.parseLog({
+              topics: event.data.topics,
+              data: event.data.data,
+            });
       // transactions can be skipped if we don't need the details in our sync handlers
       const tx =
         event.tx ||
@@ -2751,7 +2756,7 @@ const processBlock = async (
                 // check each log for a match
                 for (const log of receipts[tx.hash].logs) {
                   if (
-                    log.topics[0] === topic &&
+                    log.topics.indexOf(topic) !== -1 &&
                     getAddress(log.address) === getAddress(op.address)
                   ) {
                     // find the args for the matching log item
@@ -2766,8 +2771,15 @@ const processBlock = async (
                       type: op.eventName,
                       chainId,
                       timestamp: collectBlocks && block.timestamp,
+                      // pass the full set of data to fill callback tx !op.opts.collectTxReceipts
                       data: {
+                        address: op.address,
+                        transactionHash: tx.hash,
+                        transactionIndex: receipts[tx.hash].transactionIndex,
+                        blockHash: block.hash,
                         blockNumber: block.number,
+                        topics: log.topics,
+                        data: log.data,
                       },
                       blockNumber: block.number,
                       eventName: op.eventName,
@@ -2796,9 +2808,6 @@ const processBlock = async (
 
     // make sure we haven't been cancelled before we get here
     if (!parts.cancelled) {
-      // print number of events in stdout
-      if (!silent) process.stdout.write(`(${events.length}) `);
-
       // sort the events (this order might yet change if we add new syncs in any events)
       const sorted = events.sort((a, b) => {
         // check the transaction order of the block
@@ -2818,6 +2827,9 @@ const processBlock = async (
       // temp record what has been processed
       const processed: SyncEvent[] = [];
 
+      // record length before we started
+      const promiseQueueBefore = promiseQueue.length - 1;
+
       // for each of the sync events call the callbacks sequentially
       while (engine.events.length > 0) {
         // take one at a time from the events
@@ -2831,11 +2843,14 @@ const processBlock = async (
         // move thes changes to the parent checkpoint
         await engine?.stage?.commit();
       } else {
-        // clear the promiseQueue
-        promiseQueue.splice(0, promiseQueue.length);
+        // should splice only new messages added in this callback from the message queue
+        promiseQueue.splice(promiseQueueBefore, promiseQueue.length);
         // revert this checkpoint we're not saving it
         engine?.stage?.revert();
       }
+
+      // print number of events in stdout
+      if (!silent) process.stdout.write(`(${processed.length}) `);
 
       // if we havent been cancelled up to now we can commit this
       if (!parts.cancelled) {
@@ -2933,9 +2948,17 @@ const attachListeners = async (
   collectTxReceipts = false,
   silent = false
 ) => {
+  // retrieve engine
+  const engine = await getEngine();
+
   // get all chainIds for defined networks
   const { syncProviders } = await getNetworks();
 
+  // record the current process so that we can await its completion on close of listener
+  let currentProcess: Promise<void>;
+
+  // mark as true when we detect open
+  const opened: Record<number, boolean> = {};
   // array of blocks that need to be processed...
   const blocks: {
     chainId: number;
@@ -2948,6 +2971,10 @@ const attachListeners = async (
     }>;
     asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
   }[] = [];
+  // place inside a wrapper to update by mutations
+  const syncOpsEntityWrapper = {
+    current: syncOpsEntity,
+  };
 
   // index all migrations
   const indexedMigrations = migrations.reduce((index, migration) => {
@@ -2961,20 +2988,6 @@ const attachListeners = async (
     // return the index
     return index;
   }, {} as Record<string, Migration[]>);
-
-  // mark as true when we detect open
-  const opened: Record<number, boolean> = {};
-
-  // retrieve engine
-  const engine = await getEngine();
-
-  // record the current process so that we can await its completion on close of listener
-  let currentProcess: Promise<void>;
-
-  // place inside a wrapper to update by mutations
-  const syncOpsEntityWrapper = {
-    current: syncOpsEntity,
-  };
 
   // restructure ops into ops by chainId
   const validOps: () => Promise<Record<number, Sync[]>> = async () => {
@@ -3231,6 +3244,8 @@ const attachListeners = async (
                       restack();
                     }
                   } catch (e) {
+                    // log the error
+                    console.log(e);
                     // reattempt the failed block
                     restack();
                   }
@@ -3267,6 +3282,7 @@ const getLatestSyncMeta = async () => {
   // get all chainIds for defined networks
   const { syncProviders } = await getNetworks();
 
+  // clear engine storage
   engine.latestEntity = {};
   engine.latestBlocks = {};
 
@@ -3723,6 +3739,35 @@ export const sync = async ({
         migration.migrationKey = migrationKey;
         // set the latest blockNumber in place and move to the end
         if (migration.blockNumber === "latest") {
+          // if we don't have a latest block or the chain isn't registered, do it now...
+          if (!engine.latestBlocks[migration.chainId]) {
+            if (config && config.providers) {
+              engine.providers[migration.chainId] =
+                engine.providers[migration.chainId] || [];
+              engine.providers[migration.chainId][0] =
+                engine.providers[migration.chainId][0] ||
+                new providers.JsonRpcProvider(
+                  config.providers[migration.chainId].rpcUrl
+                );
+              // fetch the meta entity from the store (we'll update this once we've committed all changes)
+              engine.latestEntity[migration.chainId] = await Store.get(
+                "__meta__",
+                `${migration.chainId}`
+              );
+              // make sure this lines up with what we expect
+              engine.latestEntity[+migration.chainId].chainId =
+                +migration.chainId;
+              engine.latestEntity[migration.chainId].block = undefined;
+            }
+            // place current block as chainIds latestBlock
+            if (engine.providers[migration.chainId][0]) {
+              engine.latestBlocks[migration.chainId] = await getBlockByNumber(
+                engine.providers[migration.chainId][0],
+                "latest"
+              );
+            }
+          }
+          // use the latest detected block
           migration.blockNumber = engine.latestBlocks[migration.chainId].number;
         }
         // check this will be triggered here...
