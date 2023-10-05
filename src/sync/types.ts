@@ -2,6 +2,7 @@ import type {
   TransactionReceipt,
   TransactionResponse,
   Block,
+  BlockWithTransactions,
 } from "@ethersproject/abstract-provider";
 import type {
   JsonRpcProvider,
@@ -32,6 +33,7 @@ export type Engine = {
   block?: Record<number, Block>;
   newDb?: boolean;
   warmDb?: boolean;
+  readOnly?: boolean;
   lastUpdate?: number;
   syncs?: Sync[];
   promiseQueue?: (
@@ -147,6 +149,8 @@ export type SyncConfig = {
   cleanup?: boolean;
   // optionally silence std-out until error
   silent?: boolean;
+  // set readOnly on the engine via config
+  readOnly?: boolean;
   // global tx/block capture
   collectBlocks?: boolean;
   collectTxReceipts?: boolean;
@@ -244,3 +248,21 @@ export type LatestEntity = Record<
     _block_ts: number;
   }
 >;
+
+// Block listener helper
+export type AsyncBlockParts = {
+  cancelled?: boolean;
+  block: BlockWithTransactions;
+  receipts: Record<string, TransactionReceipt>;
+  syncOpsEntity: {
+    current:
+      | (Entity<{
+          id: string;
+          syncOps: SyncOp[];
+        }> & {
+          id: string;
+          syncOps: SyncOp[];
+        })
+      | false;
+  };
+};

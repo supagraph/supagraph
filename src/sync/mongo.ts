@@ -201,30 +201,33 @@ export class Mongo extends DB {
       // console.log(`putting ${key}`, val);
       this.kv[ref][id] = val;
 
-      // resolve db promise layer
-      const db = await Promise.resolve(this.db);
-      // get the collection for this entity
-      const collection = db.collection(ref);
+      // prevent alterations in read-only mode
+      if (!this.engine.readOnly) {
+        // resolve db promise layer
+        const db = await Promise.resolve(this.db);
+        // get the collection for this entity
+        const collection = db.collection(ref);
 
-      // this will update the most recent entry or upsert a new document (do we want this to insert a new doc every update?)
-      await collection.replaceOne(
-        {
-          id,
-          // if ids are unique then we can place by update by checking for a match on current block setup
-          ...(this.mutable || ref === "__meta__"
-            ? {}
-            : {
-                _block_ts: val?._block_ts,
-                _block_num: val?._block_num,
-                _chain_id: val?._chain_id,
-              }),
-        },
-        // the replacement values
-        val,
-        {
-          upsert: true,
-        }
-      );
+        // this will update the most recent entry or upsert a new document (do we want this to insert a new doc every update?)
+        await collection.replaceOne(
+          {
+            id,
+            // if ids are unique then we can place by update by checking for a match on current block setup
+            ...(this.mutable || ref === "__meta__"
+              ? {}
+              : {
+                  _block_ts: val?._block_ts,
+                  _block_num: val?._block_num,
+                  _chain_id: val?._chain_id,
+                }),
+          },
+          // the replacement values
+          val,
+          {
+            upsert: true,
+          }
+        );
+      }
     }
 
     return true;
@@ -242,15 +245,21 @@ export class Mongo extends DB {
     if (ref && id) {
       // remove from local-cache
       delete this.kv[ref][id];
-      // get the collection for this entity
-      const collection = (await Promise.resolve(this.db)).collection(ref);
-      // this will delete the latest entry - do we want to delete all entries??
-      // would it be better to put an empty here instead?
-      const document = collection.findOne({ id }, { sort: { _block_ts: -1 } });
+      // prevent alterations in read-only mode
+      if (!this.engine.readOnly) {
+        // get the collection for this entity
+        const collection = (await Promise.resolve(this.db)).collection(ref);
+        // this will delete the latest entry - do we want to delete all entries??
+        // would it be better to put an empty here instead?
+        const document = collection.findOne(
+          { id },
+          { sort: { _block_ts: -1 } }
+        );
 
-      // delete the single document we discovered
-      if (document) {
-        await collection.deleteOne(document);
+        // delete the single document we discovered
+        if (document) {
+          await collection.deleteOne(document);
+        }
       }
     }
 
@@ -288,74 +297,78 @@ export class Mongo extends DB {
 
     // eslint-disable-next-line no-restricted-syntax
     for (const collection of Object.keys(byCollection)) {
-      // eslint-disable-next-line no-await-in-loop
-      await (await Promise.resolve(this.db)).collection(collection).bulkWrite(
-        // convert the operations into a set of mongodb bulkWrite operations
-        byCollection[collection].reduce((operations, val) => {
-          // Put operation operates on the id + block to upsert a new entity entry
-          if (val.type === "put") {
-            // construct replacement value set
-            const replacement = {
-              // ignore the _id key because this will cause an error in mongo
-              ...Object.keys(val.value || {}).reduce((carr, key) => {
-                return {
-                  ...carr,
-                  // add everything but the _id
-                  ...(key !== "_id"
-                    ? {
-                        [key]: val.value?.[key],
-                      }
-                    : {}),
-                };
-              }, {} as Record<string, unknown>),
-              // add block details to the insert (this is what makes it an insert - every event should insert a new document)
-              _block_ts: val.value?._block_ts,
-              _block_num: val.value?._block_num,
-              _chain_id: val.value?._chain_id,
-            };
-            // push operation for bulkwrite
-            operations.push({
-              replaceOne: {
-                filter: {
-                  // each entry is unique by block and id
-                  id: val.key.split(".")[1],
-                  // if ids are unique then we can place by update
-                  ...(this.mutable || collection === "__meta__"
-                    ? {}
-                    : {
-                        _block_ts: val.value?._block_ts,
-                        _block_num: val.value?._block_num,
-                        _chain_id: val.value?._chain_id,
-                      }),
-                },
-                replacement,
-                // insert new entry if criteria isnt met
-                upsert: true,
+      // convert the operations into a set of mongodb bulkWrite operations
+      const batch = byCollection[collection].reduce((operations, val) => {
+        // Put operation operates on the id + block to upsert a new entity entry
+        if (val.type === "put") {
+          // construct replacement value set
+          const replacement = {
+            // ignore the _id key because this will cause an error in mongo
+            ...Object.keys(val.value || {}).reduce((carr, key) => {
+              return {
+                ...carr,
+                // add everything but the _id
+                ...(key !== "_id"
+                  ? {
+                      [key]: val.value?.[key],
+                    }
+                  : {}),
+              };
+            }, {} as Record<string, unknown>),
+            // add block details to the insert (this is what makes it an insert - every event should insert a new document)
+            _block_ts: val.value?._block_ts,
+            _block_num: val.value?._block_num,
+            _chain_id: val.value?._chain_id,
+          };
+          // push operation for bulkwrite
+          operations.push({
+            replaceOne: {
+              filter: {
+                // each entry is unique by block and id
+                id: val.key.split(".")[1],
+                // if ids are unique then we can place by update
+                ...(this.mutable || collection === "__meta__"
+                  ? {}
+                  : {
+                      _block_ts: val.value?._block_ts,
+                      _block_num: val.value?._block_num,
+                      _chain_id: val.value?._chain_id,
+                    }),
               },
-            });
-            // store in to local-cache
-            this.kv[collection][val.key.split(".")[1]] = replacement;
-          }
-          // del will delete ALL entries from the collection (this shouldnt need to be called - it might be wiser to insert an empty entry than to try to delete anything)
-          if (val.type === "del") {
-            operations.push({
-              deleteMany: {
-                filter: { id: val.key.split(".")[1] },
-              },
-            });
-            // delete the value from cache
-            delete this.kv[collection][val.key.split(".")[1]];
-          }
-          // returns all Document operations
-          return operations;
-        }, [] as unknown as AnyBulkWriteOperation<Document>[]),
-        {
-          // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
-          ordered: false,
-          // write objectIds mongo side
-          forceServerObjectId: true,
+              replacement,
+              // insert new entry if criteria isnt met
+              upsert: true,
+            },
+          });
+          // store in to local-cache
+          this.kv[collection][val.key.split(".")[1]] = replacement;
         }
-      );
+        // del will delete ALL entries from the collection (this shouldnt need to be called - it might be wiser to insert an empty entry than to try to delete anything)
+        if (val.type === "del") {
+          operations.push({
+            deleteMany: {
+              filter: { id: val.key.split(".")[1] },
+            },
+          });
+          // delete the value from cache
+          delete this.kv[collection][val.key.split(".")[1]];
+        }
+        // returns all Document operations
+        return operations;
+      }, [] as unknown as AnyBulkWriteOperation<Document>[]);
+
+      // save the batch to mongo
+      if (!this.engine.readOnly) {
+        // eslint-disable-next-line no-await-in-loop
+        await (await Promise.resolve(this.db))
+          .collection(collection)
+          .bulkWrite(batch, {
+            // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
+            ordered: false,
+            // write objectIds mongo side
+            forceServerObjectId: true,
+          });
+      }
     }
 
     return true;
