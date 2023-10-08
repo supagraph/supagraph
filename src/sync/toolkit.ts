@@ -1727,7 +1727,7 @@ const getNewSyncEvents = async (
         // starting from the last block we synced to or from latestBlock (if startBlock===latest), or from given startBlock if newDB
         const fromBlock =
           startBlock === "latest"
-            ? +engine.latestBlocks[chainId].number - 1
+            ? +engine.latestBlocks[chainId].number + 1
             : (engine.latestEntity[chainId]?.latestBlock &&
                 +engine.latestEntity[chainId].latestBlock + 1) ||
               startBlock;
@@ -2205,7 +2205,7 @@ const processEvents = async (
     // log that we're starting
     if (!silent) process.stdout.write(`\n--\n\nEvents processed `);
 
-    // iterate the sorted events and process the callbacks with the given args (sequentially)
+    // iterate the sorted events and process the callbacks with the given args (sequentially - event loop to process all callbacks)
     while (engine.events.length) {
       // take the first item from the sorted array
       const opSorted = engine.events.splice(0, 1)[0];
@@ -2228,6 +2228,8 @@ const processEvents = async (
       } catch (e) {
         // log any errors from handlers - this should probably halt execution
         console.log(e);
+        // clear anything added here...
+        engine.stage.revert();
         // throw the error again
         throw e;
       }
@@ -2524,17 +2526,6 @@ const processBlock = async (
     cancelled?: boolean;
     block: BlockWithTransactions & any;
     receipts: Record<string, TransactionReceipt>;
-    syncOpsEntity: {
-      current:
-        | (Entity<{
-            id: string;
-            syncOps: SyncOp[];
-          }> & {
-            id: string;
-            syncOps: SyncOp[];
-          })
-        | false;
-    };
   }>
 ) => {
   // open a checkpoint on the db...
@@ -2581,7 +2572,7 @@ const processBlock = async (
   const parts = await asyncParts;
 
   // unpack the async parts  - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-  const { block, receipts, cancelled, syncOpsEntity } = parts;
+  const { block, receipts, cancelled } = parts;
 
   // set the chainId into the engine
   Store.setChainId(chainId);
@@ -2831,12 +2822,38 @@ const processBlock = async (
       // record length before we started
       const promiseQueueBefore = promiseQueue.length - 1;
 
-      // for each of the sync events call the callbacks sequentially
+      // for each of the sync events call the callbacks sequentially (event loop to process all callbacks)
       while (engine.events.length > 0) {
-        // take one at a time from the events
+        // take the first item from the sorted array
         const event = engine.events.splice(0, 1)[0];
-        // process each callback type
-        await processCallback(event, parts, processed);
+
+        // create a checkpoint
+        engine?.stage?.checkpoint();
+
+        // collect the indexes of any promises made during execution for easy revert
+        let promiseQueueBeforeEachProcess: number;
+        // wrap in try catch so that we don't leave any checkpoints open
+        try {
+          // position queue marker at new length
+          promiseQueueBeforeEachProcess = promiseQueue.length;
+          // process the callback for the given type
+          await processCallback(event, parts, processed);
+        } catch (e) {
+          // log any errors from handlers - this should probably halt execution
+          console.log(e);
+          // should splice only new messages added in this callback from the message queue
+          promiseQueue.splice(
+            promiseQueueBeforeEachProcess,
+            promiseQueue.length
+          );
+          // clear anything added here...
+          engine.stage.revert();
+          // throw the error again
+          throw e;
+        }
+
+        // commit the checkpoint on the db...
+        await engine?.stage?.commit();
       }
 
       // commit or revert
@@ -2881,15 +2898,17 @@ const processBlock = async (
           }
           // clear the promiseQueue for next iteration
           promiseQueue.splice(0, promiseQueue.length);
+
           // mark after we end the processing
           if (!silent) {
             process.stdout.write(`✔\nEntities stored `);
           }
+
           // update with any new syncOps added in the sync
-          if (engine.handlers && syncOpsEntity.current) {
+          if (engine.handlers && engine.syncOps.meta) {
             // record the new syncs to db (this will replace the current entry)
-            syncOpsEntity.current = await recordSyncsOpsMeta(
-              syncOpsEntity.current,
+            engine.syncOps.meta = await updateSyncsOpsMeta(
+              engine.syncOps.meta,
               engine.syncs
             );
           }
@@ -2936,15 +2955,6 @@ const attachListeners = async (
     resolve?: (value: void | PromiseLike<void>) => void;
   } = undefined,
   migrations: Migration[] = [],
-  syncOpsEntity:
-    | (Entity<{
-        id: string;
-        syncOps: SyncOp[];
-      }> & {
-        id: string;
-        syncOps: SyncOp[];
-      })
-    | false = false,
   collectBlocks = false,
   collectTxReceipts = false,
   silent = false
@@ -2965,11 +2975,6 @@ const attachListeners = async (
     asyncParts: Promise<() => Promise<AsyncBlockParts>>;
     asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
   }[] = [];
-
-  // place inside a wrapper to update by mutations
-  const syncOpsEntityWrapper = {
-    current: syncOpsEntity,
-  };
 
   // index all migrations
   const indexedMigrations = migrations.reduce((index, migration) => {
@@ -3102,7 +3107,6 @@ const attachListeners = async (
         return {
           block,
           receipts,
-          syncOpsEntity: syncOpsEntityWrapper,
         } as AsyncBlockParts;
       } catch {
         return false as unknown as AsyncBlockParts;
@@ -3181,6 +3185,22 @@ const attachListeners = async (
     })
   );
 
+  // method to cancel the block
+  const cancelBlockAfterTimeout = (
+    blockAndReceipts: Promise<AsyncBlockParts>
+  ) => {
+    // return a promise to resolve the block
+    return new Promise<void>((resolve) => {
+      // add another 60s to process the block
+      setTimeout(async () => {
+        // set cancelled on the asyncParts obj we're passing through processBlock
+        (await blockAndReceipts).cancelled = true;
+        // resolve to try again
+        resolve();
+      }, 60000); // max of 60s per block - we'll adjust if needed
+    });
+  };
+
   // on the outside, we need to process all events emitted by the handlers to execute procedurally
   Promise.resolve()
     .then(async () => {
@@ -3188,88 +3208,78 @@ const attachListeners = async (
       while (state.listening) {
         // once the state moves to inSync - we can start taking blocks from the array to process
         if (blocks.length && state.inSync) {
-          // record the current process so that it can be awaited in remove listener logic
-          await Promise.resolve().then(async () => {
-            // take the next block in the queue
-            const [
-              { number: blockNumber, chainId, asyncParts, asyncEntities },
-            ] = blocks.splice(0, 1);
+          // take the next block in the queue
+          const [{ number: blockNumber, chainId, asyncParts, asyncEntities }] =
+            blocks.splice(0, 1);
 
-            // restack this at the top so that we can try again
-            const restack = () => {
-              blocks.splice(0, 0, {
-                number: blockNumber,
-                chainId,
-                // recreate the async parts to pull everything fresh
-                asyncParts: saveBlockAndReceipts(chainId, blockNumber),
-                // this shouldn't fail (but it could be empty)
-                asyncEntities,
-              });
-            };
+          // restack this at the top so that we can try again
+          const restack = () => {
+            blocks.splice(0, 0, {
+              number: blockNumber,
+              chainId,
+              // recreate the async parts to pull everything fresh
+              asyncParts: saveBlockAndReceipts(chainId, blockNumber),
+              // this shouldn't fail (but it could be empty)
+              asyncEntities,
+            });
+          };
 
-            // check if this block needs to be processed (check its not included in the catchup-set)
-            if (
-              engine.startBlocks[+chainId] &&
-              blockNumber >= engine.startBlocks[+chainId] &&
-              blockNumber >= engine.latestBlocks[+chainId].number
-            ) {
-              // start reading data from disk - this will pull the async data at chainId with current blocknumber
-              const blockAndReceipts = (await asyncParts)();
-              // wrap in a race here so that we never spend too long stuck on a block
-              await Promise.race([
-                new Promise<void>((resolve) => {
-                  // add another 60s to process the block
-                  setTimeout(async () => {
-                    // set cancelled on the asyncParts obj we're passing through processBlock
-                    (await blockAndReceipts).cancelled = true;
-                    // resolve to try again
-                    resolve();
-                  }, 60000); // max of 60s per block - we'll adjust if needed
-                }),
-                Promise.resolve().then(async () => {
-                  try {
-                    // attempt to process the block
-                    await processBlock(
-                      +chainId,
-                      // process validOps each tick to check for new syncs
-                      await validOps(),
-                      // blockNumber being processed...
-                      blockNumber,
-                      // pass through the config...
-                      collectBlocks,
-                      collectTxReceipts,
-                      silent,
-                      // pass through the length of the queue for reporting and for deciding if we should be saving or not
-                      blocks.length,
-                      // helper parts to pass through entities, block & receipts...
-                      indexedMigrations,
-                      asyncEntities,
-                      blockAndReceipts
+          // check if this block needs to be processed (check its not included in the catchup-set)
+          if (
+            engine.startBlocks[+chainId] &&
+            blockNumber >= engine.startBlocks[+chainId] &&
+            blockNumber >= engine.latestBlocks[+chainId].number
+          ) {
+            // start reading data from disk - this will pull the async data at chainId with current blocknumber
+            const blockAndReceipts = (await asyncParts)();
+            // wrap in a race here so that we never spend too long stuck on a block
+            await Promise.race([
+              // place a promise to cancel the block in 60s
+              cancelBlockAfterTimeout(blockAndReceipts),
+              // attempt to resolve everything that happened in the block...
+              Promise.resolve().then(async () => {
+                try {
+                  // attempt to process the block
+                  await processBlock(
+                    +chainId,
+                    // process validOps each tick to check for new syncs
+                    await validOps(),
+                    // blockNumber being processed...
+                    blockNumber,
+                    // pass through the config...
+                    collectBlocks,
+                    collectTxReceipts,
+                    silent,
+                    // pass through the length of the queue for reporting and for deciding if we should be saving or not
+                    blocks.length,
+                    // helper parts to pass through entities, block & receipts...
+                    indexedMigrations,
+                    asyncEntities,
+                    blockAndReceipts
+                  );
+                  // record the new number
+                  if (!(await blockAndReceipts).cancelled) {
+                    engine.latestBlocks[+chainId] = {
+                      number: blockNumber,
+                    } as unknown as Block;
+                    // always delete the  block and receipts from tmp storage - we'll never use it again
+                    await deleteJSON(
+                      "blockAndReceipts",
+                      `${chainId}-${+blockNumber}`
                     );
-                    // record the new number
-                    if (!(await blockAndReceipts).cancelled) {
-                      engine.latestBlocks[+chainId] = {
-                        number: blockNumber,
-                      } as unknown as Block;
-                      // always delete the  block and receipts from tmp storage - we'll never use it again
-                      await deleteJSON(
-                        "blockAndReceipts",
-                        `${chainId}-${+blockNumber}`
-                      );
-                    } else {
-                      // reattempt the timedout block
-                      restack();
-                    }
-                  } catch (e) {
-                    // log the error
-                    console.log(e);
-                    // reattempt the failed block
+                  } else {
+                    // reattempt the timedout block
                     restack();
                   }
-                }),
-              ]);
-            }
-          });
+                } catch (e) {
+                  // log the error
+                  console.log(e);
+                  // reattempt the failed block
+                  restack();
+                }
+              }),
+            ]);
+          }
         } else {
           // wait 1 second for something to enter the queue
           await new Promise((resolve) => {
@@ -3353,6 +3363,54 @@ const getLatestSyncMeta = async () => {
   };
 };
 
+// check if the table is locked for any of the chainIds
+const checkLocks = async (chainIds: Set<number>, startTime: number) => {
+  // get the engine
+  const engine = await getEngine();
+
+  // this collects the meta regarding when we last ran the sync
+  const { locked, blocked } = await getLatestSyncMeta();
+
+  // if any are locked we can escape...
+  const anyLocked = [...chainIds].reduce(
+    (isLocked, chainId) => isLocked || locked[chainId],
+    false
+  );
+
+  // check if any of our connections are locked/blocked (only proceeds when all chains exceed LOCKED_FOR)
+  if (anyLocked) {
+    // close connection or release if blocked time has ellapsed
+    for (const chainId of chainIds) {
+      // when the db is locked check if it should be released before ending all operations
+      if (
+        !engine.newDb &&
+        locked[chainId] &&
+        // this offset should be chain dependent
+        +blocked[chainId] + LOCKED_FOR >
+          (+engine.latestBlocks[chainId].number || 0)
+      ) {
+        // mark the operation in the log
+        if (!engine.flags.silent)
+          console.log("Sync error - chainId ", chainId, " is locked");
+
+        // record when we finished the sync operation
+        const endTime = performance.now();
+
+        // print time in console
+        if (!engine.flags.silent)
+          console.log(
+            `\n===\n\nTotal execution time: ${(
+              Number(endTime - startTime) / 1000
+            ).toPrecision(4)}s\n\n`
+          );
+
+        // return error state to caller
+        throw new Error("DB is locked");
+      }
+    }
+  }
+};
+
 // retrieve the syncOps from storage
 const getSyncsOpsMeta = async () => {
   // from the __meta__ table we need to collect opSync operations - these can be saved as a normalised doc in the collection
@@ -3367,7 +3425,7 @@ const getSyncsOpsMeta = async () => {
 };
 
 // record the full set of syncOps as provided - these needs to be called after initial sync and based on any changes we make during runtime
-const recordSyncsOpsMeta = async (
+const updateSyncsOpsMeta = async (
   syncOpsEntity: Entity<{
     id: string;
     syncOps: SyncOp[];
@@ -3405,6 +3463,257 @@ const recordSyncsOpsMeta = async (
 
   // save changes
   return syncOpsEntity.save();
+};
+
+// restore the sync from config & db
+const restoreSyncOps = async (config: SyncConfig, handlers: Handlers) => {
+  // retrieve the engine
+  const engine = await getEngine();
+
+  // get the entity wrapper but dont fetch anything yet...
+  let syncOpsMeta: Entity<{
+    id: string;
+    syncOps: SyncOp[];
+  }> & {
+    id: string;
+    syncOps: SyncOp[];
+  } = await Store.get("__meta__", `syncOps`, true);
+
+  // new array for the syncs
+  let syncOps = [];
+
+  // set the initial sync object
+  if (
+    Object.keys(handlers || {}).length ||
+    Object.keys(engine.handlers || {}).length
+  ) {
+    // fetch from the __meta__ table if we have handlers to restore against
+    syncOpsMeta = await getSyncsOpsMeta();
+
+    // set the syncs into the engines syncs config
+    if (syncOpsMeta.syncOps && syncOpsMeta.syncOps.length) {
+      // place the handlers into the engine
+      engine.handlers =
+        !handlers && Object.keys(engine.handlers).length
+          ? engine.handlers
+          : handlers || {};
+
+      // set config defined syncs first then merge runtime added syncs preserving config edits
+      if (config && engine.handlers) {
+        // set the config against engine.syncs
+        await setSyncs(config, engine.handlers, syncOps);
+      }
+
+      // assign db stored syncs in to the engine so long as they hold a "runtime" mode opt
+      await Promise.all(
+        syncOpsMeta.syncOps.map(async (syncOp) => {
+          // get the checksum address
+          const cbAddress =
+            (syncOp.address &&
+              `${syncOp.chainId.toString()}-${getAddress(syncOp.address)}`) ||
+            syncOp.chainId.toString();
+          // so long as the handler is defined and the item was added in "runtime" mode...
+          if (
+            handlers[syncOp.handlers][syncOp.eventName] &&
+            // ie; only restore syncs which havent been hardcoded into the config
+            !engine.opSyncs[`${cbAddress}-${syncOp.eventName}`] &&
+            // if we've restarted back to startBlock then we can replace this sync at runtime again with an addSync in the same place (if we need to remove all of associations we can change the handler refs)
+            syncOp.mode === "runtime"
+          ) {
+            // default the provider container
+            engine.providers[syncOp.chainId] =
+              engine.providers[syncOp.chainId] || [];
+            // set the rpc provider if undefined for this chainId
+            engine.providers[syncOp.chainId][0] =
+              engine.providers[syncOp.chainId][0] ||
+              new providers.JsonRpcProvider(
+                config.providers[syncOp.chainId].rpcUrl
+              );
+            // construct the provider for this chainId
+            const provider = (await getProvider(
+              syncOp.chainId
+            )) as providers.JsonRpcProvider;
+            // construct the opSync object
+            const opSync = {
+              provider,
+              eventName: syncOp.eventName,
+              name: syncOp.name as string,
+              chainId: syncOp.chainId,
+              startBlock: syncOp.startBlock,
+              endBlock: syncOp.endBlock,
+              address: syncOp.address,
+              eventAbi: syncOp.events,
+              handlers: syncOp.handlers,
+              opts: {
+                mode: syncOp.mode,
+                collectBlocks: syncOp.collectBlocks,
+                collectTxReceipts: syncOp.collectTxReceipts,
+              },
+              onEvent: handlers[syncOp.handlers][syncOp.eventName],
+            };
+            // assign into engine
+            engine.opSyncs[`${cbAddress}-${syncOp.eventName}`] = opSync;
+            // and record into syncs
+            syncOps.push(opSync);
+          }
+        })
+      );
+    } else if (config && handlers) {
+      // set the config against engine.syncs
+      await setSyncs(config, handlers, syncOps);
+    }
+
+    // record the new syncs to db (this will replace the current entry)
+    syncOpsMeta = await updateSyncsOpsMeta(syncOpsMeta, syncOps);
+  } else {
+    // assign global syncs to engines syncs (we have no config in the sync call)
+    syncOps = syncs;
+  }
+
+  // will always return an entity
+  return {
+    syncs: syncOps,
+    meta: syncOpsMeta,
+  };
+};
+
+// apply any migrations that fit in the event range
+const applyMigrations = async (
+  migrations: Migration[],
+  config: SyncConfig,
+  events: {
+    type: string;
+    data: ethers.Event;
+    chainId: number;
+    number: number;
+    blockNumber: number;
+    collectTxReceipt: boolean;
+    collectBlock: boolean;
+    timestamp?: number;
+    from?: string;
+  }[]
+) => {
+  // retrieve the engine
+  const engine = await getEngine();
+
+  // check for migrations - we should insert an event for every item in the entity collection to run the callback
+  if (migrations) {
+    let migrationCount = 0;
+    // check if we have any migrations to run in this range
+    for (const migrationKey of Object.keys(migrations)) {
+      // locate the migration
+      const migration = migrations[migrationKey];
+      // set the migrationKey into the migration
+      migration.migrationKey = migrationKey;
+      // set the latest blockNumber in place and move to the end
+      if (migration.blockNumber === "latest") {
+        // if we don't have a latest block or the chain isn't registered, do it now...
+        if (!engine.latestBlocks[migration.chainId]) {
+          if (config && config.providers) {
+            engine.providers[migration.chainId] =
+              engine.providers[migration.chainId] || [];
+            engine.providers[migration.chainId][0] =
+              engine.providers[migration.chainId][0] ||
+              new providers.JsonRpcProvider(
+                config.providers[migration.chainId].rpcUrl
+              );
+            // fetch the meta entity from the store (we'll update this once we've committed all changes)
+            engine.latestEntity[migration.chainId] = await Store.get(
+              "__meta__",
+              `${migration.chainId}`
+            );
+            // make sure this lines up with what we expect
+            engine.latestEntity[+migration.chainId].chainId =
+              +migration.chainId;
+            engine.latestEntity[migration.chainId].block = undefined;
+          }
+          // place current block as chainIds latestBlock
+          if (engine.providers[migration.chainId][0]) {
+            engine.latestBlocks[migration.chainId] = await getBlockByNumber(
+              engine.providers[migration.chainId][0],
+              "latest"
+            );
+          }
+        }
+        // use the latest detected block
+        migration.blockNumber = engine.latestBlocks[migration.chainId].number;
+      }
+      // check this will be triggered here...
+      if (
+        migration.blockNumber >= engine.startBlocks[migration.chainId] &&
+        migration.blockNumber <= engine.latestBlocks[migration.chainId].number
+      ) {
+        // assign the callback (masquarade this as valid for the context)
+        engine.callbacks[
+          `${migration.chainId}-migration-${migration.blockNumber}-${
+            migration.entity || "false"
+          }-${migration.migrationKey}`
+        ] = migration.handler as unknown as HandlerFn;
+        // if we're basing this on entity, then push an event for each entity
+        if (migration.entity) {
+          // this migration needs to be ran within this sync - start gathering the query results now
+          const allEntries =
+            migration.entity &&
+            ((await engine.db.get(migration.entity)) as ({
+              id: string;
+            } & Record<string, unknown>)[]);
+
+          // push a migration entry
+          allEntries.forEach((entity) => {
+            events.push({
+              // insert as migration type
+              type: "migration",
+              // @ts-ignore
+              data: {
+                entity: new Entity<typeof entity>(migration.entity, entity.id, [
+                  ...Object.keys(entity).map((key) => {
+                    return new TypedMapEntry(key, entity[key]);
+                  }),
+                ]),
+                // set the name for callback recall
+                entityName: migration.entity,
+                blockNumber: migration.blockNumber as number,
+              } as unknown as Event,
+              chainId: migration.chainId,
+              blockNumber: migration.blockNumber as number,
+              migrationKey: migration.migrationKey,
+              collectBlock: true,
+              collectTxReceipt: false,
+            });
+            // incr by one
+            migrationCount += 1;
+          });
+        } else {
+          events.push({
+            // insert as migration type
+            type: "migration",
+            // @ts-ignore
+            data: {
+              blockNumber: migration.blockNumber as number,
+            } as unknown as Event,
+            chainId: migration.chainId,
+            blockNumber: migration.blockNumber as number,
+            migrationKey: migration.migrationKey,
+            collectBlock: true,
+            collectTxReceipt: false,
+          });
+          // incr by one
+          migrationCount += 1;
+        }
+      }
+    }
+    // if we're starting the process here then print the discovery
+    if (
+      !engine.flags.silent &&
+      (!engine.flags.start ||
+        (engine.flags.start &&
+          SyncStage[engine.flags.start] < SyncStage.process)) &&
+      migrationCount > 0
+    ) {
+      // detail everything which was loaded in this run
+      console.log("Total no. migrations in range:", migrationCount, "\n\n--\n");
+    }
+  }
 };
 
 // sync all events since last sync operation
@@ -3467,120 +3776,16 @@ export const sync = async ({
   engine.providers = engine.providers ?? {};
 
   // pointer to the meta document containing current set of syncs
-  let syncOpsMeta: Entity<{
-    id: string;
-    syncOps: SyncOp[];
-  }> & {
-    id: string;
-    syncOps: SyncOp[];
-  };
-
-  // keep track of connected listeners in listen mode
-  const listeners: (() => void)[] = [];
-
-  // set the control set for all listeners
-  const controls = {
-    inSync: false,
-    listening: true,
-  };
-
-  // set the initial sync object
-  if (
-    Object.keys(handlers || {}).length ||
-    Object.keys(engine.handlers || {}).length
-  ) {
-    // if config is provided, we can source our syncs from db
-    syncOpsMeta = await getSyncsOpsMeta();
-
-    // set the syncs into the engines syncs config
-    if (syncOpsMeta.syncOps && syncOpsMeta.syncOps.length) {
-      // place the handlers into the engine
-      engine.handlers =
-        !handlers && Object.keys(engine.handlers).length
-          ? engine.handlers
-          : handlers || {};
-
-      // set config defined syncs first then merge runtime added syncs preserving config edits
-      if (config && engine.handlers) {
-        // start a new syncs object
-        engine.syncs = [];
-        // set the config against engine.syncs
-        await setSyncs(config, engine.handlers, engine.syncs);
-      }
-
-      // assign db stored syncs in to the engine so long as they hold a "runtime" mode opt
-      await Promise.all(
-        syncOpsMeta.syncOps.map(async (syncOp) => {
-          // get the checksum address
-          const cbAddress =
-            (syncOp.address &&
-              `${syncOp.chainId.toString()}-${getAddress(syncOp.address)}`) ||
-            syncOp.chainId.toString();
-          // so long as the handler is defined and the item was added in "runtime" mode...
-          if (
-            handlers[syncOp.handlers][syncOp.eventName] &&
-            // ie; only restore syncs which havent been hardcoded into the config
-            !engine.opSyncs[`${cbAddress}-${syncOp.eventName}`] &&
-            // if we've restarted back to startBlock then we can replace this sync at runtime again with an addSync in the same place (if we need to remove all of associations we can change the handler refs)
-            syncOp.mode === "runtime"
-          ) {
-            // default the provider container
-            engine.providers[syncOp.chainId] =
-              engine.providers[syncOp.chainId] || [];
-            // set the rpc provider if undefined for this chainId
-            engine.providers[syncOp.chainId][0] =
-              engine.providers[syncOp.chainId][0] ||
-              new providers.JsonRpcProvider(
-                config.providers[syncOp.chainId].rpcUrl
-              );
-            // construct the provider for this chainId
-            const provider = (await getProvider(
-              syncOp.chainId
-            )) as providers.JsonRpcProvider;
-            // construct the opSync object
-            const opSync = {
-              provider,
-              eventName: syncOp.eventName,
-              name: syncOp.name as string,
-              chainId: syncOp.chainId,
-              startBlock: syncOp.startBlock,
-              endBlock: syncOp.endBlock,
-              address: syncOp.address,
-              eventAbi: syncOp.events,
-              handlers: syncOp.handlers,
-              opts: {
-                mode: syncOp.mode,
-                collectBlocks: syncOp.collectBlocks,
-                collectTxReceipts: syncOp.collectTxReceipts,
-              },
-              onEvent: handlers[syncOp.handlers][syncOp.eventName],
-            };
-            // assign into engine
-            engine.opSyncs[`${cbAddress}-${syncOp.eventName}`] = opSync;
-            // and record into syncs
-            engine.syncs.push(opSync);
-          }
-        })
-      );
-    } else if (config && handlers) {
-      // start a new syncs object
-      engine.syncs = [];
-      // set the config against engine.syncs
-      await setSyncs(config, handlers, engine.syncs);
-    }
-
-    // record the new syncs to db (this will replace the current entry)
-    syncOpsMeta = await recordSyncsOpsMeta(syncOpsMeta, engine.syncs);
-  } else {
-    // assign global syncs to engines syncs (we have no config in the sync call)
-    engine.syncs = syncs;
-  }
+  engine.syncOps = await restoreSyncOps(config, handlers);
 
   // sort the syncs - this is what we're searching for in this run and future "listens"
-  engine.syncs = sortSyncs(engine.syncs);
+  engine.syncs = sortSyncs(engine.syncOps.syncs);
 
   // get all chainIds for defined networks
   const { chainIds } = await getNetworks();
+
+  // keep track of connected listeners in listen mode
+  const listeners: (() => void)[] = [];
 
   // allow options to be set by config instead of by top level if supplied
   listen = config ? config.listen ?? listen : listen;
@@ -3606,47 +3811,8 @@ export const sync = async ({
 
   // attempt to pull the latest data
   try {
-    // this collects the meta regarding when we last ran the sync
-    const { locked, blocked } = await getLatestSyncMeta();
-
-    // if any are locked we can escape...
-    const anyLocked = [...chainIds].reduce(
-      (isLocked, chainId) => isLocked || locked[chainId],
-      false
-    );
-
-    // check if any of our connections are locked/blocked (only proceeds when all chains exceed LOCKED_FOR)
-    if (anyLocked) {
-      // close connection or release if blocked time has ellapsed
-      for (const chainId of chainIds) {
-        // when the db is locked check if it should be released before ending all operations
-        if (
-          !engine.newDb &&
-          locked[chainId] &&
-          // this offset should be chain dependent
-          +blocked[chainId] + LOCKED_FOR >
-            (+engine.latestBlocks[chainId].number || 0)
-        ) {
-          // mark the operation in the log
-          if (!silent)
-            console.log("Sync error - chainId ", chainId, " is locked");
-
-          // record when we finished the sync operation
-          const endTime = performance.now();
-
-          // print time in console
-          if (!silent)
-            console.log(
-              `\n===\n\nTotal execution time: ${(
-                Number(endTime - startTime) / 1000
-              ).toPrecision(4)}s\n\n`
-            );
-
-          // return error state to caller
-          throw new Error("DB is locked");
-        }
-      }
-    }
+    // await the lock check
+    await checkLocks(chainIds, startTime);
 
     // check if we're globally including, or individually including the blocks
     const collectAnyBlocks = engine.syncs.reduce((collectBlock, opSync) => {
@@ -3660,6 +3826,12 @@ export const sync = async ({
       },
       collectTxReceipts
     );
+
+    // set the control set for all listeners (to open / close the handlers)
+    const controls = {
+      inSync: false,
+      listening: true,
+    };
 
     // event listener will see all blocks and transactions passing everything to appropriate handlers in block/tx/log order (grouped by type)
     if (listen) {
@@ -3685,7 +3857,6 @@ export const sync = async ({
             controls,
             errorHandler,
             migrations,
-            syncOpsMeta,
             collectBlocks,
             collectTxReceipts,
             silent
@@ -3749,130 +3920,8 @@ export const sync = async ({
       throw e;
     });
 
-    // check for migrations - we should insert an event for every item in the entity collection to run the callback
-    if (migrations) {
-      let migrationCount = 0;
-      // check if we have any migrations to run in this range
-      for (const migrationKey of Object.keys(migrations)) {
-        // locate the migration
-        const migration = migrations[migrationKey];
-        // set the migrationKey into the migration
-        migration.migrationKey = migrationKey;
-        // set the latest blockNumber in place and move to the end
-        if (migration.blockNumber === "latest") {
-          // if we don't have a latest block or the chain isn't registered, do it now...
-          if (!engine.latestBlocks[migration.chainId]) {
-            if (config && config.providers) {
-              engine.providers[migration.chainId] =
-                engine.providers[migration.chainId] || [];
-              engine.providers[migration.chainId][0] =
-                engine.providers[migration.chainId][0] ||
-                new providers.JsonRpcProvider(
-                  config.providers[migration.chainId].rpcUrl
-                );
-              // fetch the meta entity from the store (we'll update this once we've committed all changes)
-              engine.latestEntity[migration.chainId] = await Store.get(
-                "__meta__",
-                `${migration.chainId}`
-              );
-              // make sure this lines up with what we expect
-              engine.latestEntity[+migration.chainId].chainId =
-                +migration.chainId;
-              engine.latestEntity[migration.chainId].block = undefined;
-            }
-            // place current block as chainIds latestBlock
-            if (engine.providers[migration.chainId][0]) {
-              engine.latestBlocks[migration.chainId] = await getBlockByNumber(
-                engine.providers[migration.chainId][0],
-                "latest"
-              );
-            }
-          }
-          // use the latest detected block
-          migration.blockNumber = engine.latestBlocks[migration.chainId].number;
-        }
-        // check this will be triggered here...
-        if (
-          migration.blockNumber >= engine.startBlocks[migration.chainId] &&
-          migration.blockNumber <= engine.latestBlocks[migration.chainId].number
-        ) {
-          // assign the callback (masquarade this as valid for the context)
-          engine.callbacks[
-            `${migration.chainId}-migration-${migration.blockNumber}-${
-              migration.entity || "false"
-            }-${migration.migrationKey}`
-          ] = migration.handler as unknown as HandlerFn;
-          // if we're basing this on entity, then push an event for each entity
-          if (migration.entity) {
-            // this migration needs to be ran within this sync - start gathering the query results now
-            const allEntries =
-              migration.entity &&
-              ((await engine.db.get(migration.entity)) as ({
-                id: string;
-              } & Record<string, unknown>)[]);
-
-            // push a migration entry
-            allEntries.forEach((entity) => {
-              events.push({
-                // insert as migration type
-                type: "migration",
-                // @ts-ignore
-                data: {
-                  entity: new Entity<typeof entity>(
-                    migration.entity,
-                    entity.id,
-                    [
-                      ...Object.keys(entity).map((key) => {
-                        return new TypedMapEntry(key, entity[key]);
-                      }),
-                    ]
-                  ),
-                  // set the name for callback recall
-                  entityName: migration.entity,
-                  blockNumber: migration.blockNumber as number,
-                } as unknown as Event,
-                chainId: migration.chainId,
-                blockNumber: migration.blockNumber as number,
-                migrationKey: migration.migrationKey,
-                collectBlock: true,
-                collectTxReceipt: false,
-              });
-              // incr by one
-              migrationCount += 1;
-            });
-          } else {
-            events.push({
-              // insert as migration type
-              type: "migration",
-              // @ts-ignore
-              data: {
-                blockNumber: migration.blockNumber as number,
-              } as unknown as Event,
-              chainId: migration.chainId,
-              blockNumber: migration.blockNumber as number,
-              migrationKey: migration.migrationKey,
-              collectBlock: true,
-              collectTxReceipt: false,
-            });
-            // incr by one
-            migrationCount += 1;
-          }
-        }
-      }
-      // if we're starting the process here then print the discovery
-      if (
-        !silent &&
-        (!start || (start && SyncStage[start] < SyncStage.process)) &&
-        migrationCount > 0
-      ) {
-        // detail everything which was loaded in this run
-        console.log(
-          "Total no. migrations in range:",
-          migrationCount,
-          "\n\n--\n"
-        );
-      }
-    }
+    // apply any migrations that fit the event range
+    await applyMigrations(migrations, config, events);
 
     // set the appendEvents against the engine to allow events to be appended during runtime (via addSync)
     engine.appendEvents = async (prcEvents: SyncEvent[], opSilent: boolean) => {
@@ -3923,10 +3972,14 @@ export const sync = async ({
       start,
       stop
     );
+
     // update with any new syncOps added in the sync
-    if (engine.handlers && syncOpsMeta) {
+    if (engine.handlers && engine.syncOps.meta) {
       // record the new syncs to db (this will replace the current entry)
-      syncOpsMeta = await recordSyncsOpsMeta(syncOpsMeta, engine.syncs);
+      engine.syncOps.meta = await updateSyncsOpsMeta(
+        engine.syncOps.meta,
+        engine.syncs
+      );
     }
 
     // record when we finished the sync operation
