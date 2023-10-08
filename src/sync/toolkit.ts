@@ -2512,7 +2512,7 @@ const processCallback = async (
 };
 
 // process a new block as it arrives
-const processBlock = async (
+const processListenerBlock = async (
   chainId: number,
   validOps: Record<number, Sync[]>,
   blockNumber: number,
@@ -2941,6 +2941,291 @@ const processBlock = async (
   }
 };
 
+// pull all block and receipt details (cancel attempt after 30s)
+const saveListenerBlockAndReceipts = async (
+  chainId: number,
+  blockNumber: number
+) => {
+  // retrieve engine
+  const engine = await getEngine();
+
+  // get all chainIds for defined networks
+  const { syncProviders } = await getNetworks();
+
+  // fn to read the json from disk - if we attempt a block again, the data might be good...
+  const blockAndReceipts = readListenerBlockAndReceipts(chainId, blockNumber);
+  // get a response (maybe)
+  const file = await blockAndReceipts();
+
+  // return the full block and receipts in 60s or cancel
+  return file && !file.cancelled && file.block && file.receipts
+    ? // file was available on disk - pass through on a callback
+      async () => file
+    : // we need to pull the data and save the file to disk...
+      Promise.resolve().then(async () => {
+        // get the full block details
+        const block = await getBlockByNumber(
+          syncProviders[+chainId],
+          blockNumber
+        );
+
+        // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
+        const receipts = (
+          await Promise.all(
+            block.transactions.map(async function getReceipt(
+              tx: TransactionResponse
+            ) {
+              // this promise.all is trapped until we resolve all tx receipts in the block
+              try {
+                // get the receipt
+                const fullTx = await getTransactionReceipt(
+                  syncProviders[+chainId],
+                  tx
+                );
+                // try again
+                if (!fullTx.transactionHash) throw new Error("Missing hash");
+
+                // if we're tmp storing data...
+                if (!engine.flags.cleanup) {
+                  // save each tx to disk to release from mem
+                  await saveJSON(
+                    "transactions",
+                    `${chainId}-${fullTx.transactionHash}`,
+                    fullTx as unknown as Record<string, unknown>
+                  );
+                }
+
+                // return the tx
+                return fullTx;
+              } catch {
+                // attempt to get receipt again on failure
+                return getReceipt(tx);
+              }
+            })
+          )
+        ).reduce((all, receipt) => {
+          // combine all receipts to create an indexed lookup obj
+          return {
+            ...all,
+            [receipt.transactionHash]: receipt,
+          };
+        }, {});
+
+        // if we're tmp storing data...
+        if (!engine.flags.cleanup) {
+          // save the block for sync-cache
+          await saveJSON("blocks", `${chainId}-${+block.number}`, {
+            block,
+          });
+        }
+
+        // save everything together to reduce readback i/o (if we're using cleanup true - this is all we will save)
+        await saveJSON("blockAndReceipts", `${chainId}-${+block.number}`, {
+          block,
+          receipts,
+        });
+
+        // return a fn to read the block and all receipts in the block (this will trigger a read again)
+        return blockAndReceipts;
+      });
+};
+
+// read a block and its receipt from disk
+const readListenerBlockAndReceipts = (chainId: number, blockNumber: number) => {
+  // we're wrapping a closure with the chainId and blockNumber to be called later...
+  return async () => {
+    try {
+      const { block, receipts } = await readJSON(
+        "blockAndReceipts",
+        `${chainId}-${+blockNumber}`
+      );
+      return {
+        block,
+        receipts,
+      } as AsyncBlockParts;
+    } catch {
+      return false as unknown as AsyncBlockParts;
+    }
+  };
+};
+
+// record the block for the given chainId
+const recordListenerBlock = async (
+  chainId: number,
+  blockNumber: number,
+  indexedMigrations: Record<string, Migration[]>,
+  blocks: {
+    chainId: number;
+    number: number;
+    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
+    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
+  }[]
+) => {
+  const engine = await getEngine();
+  // store all in sparse array (as obj)
+  const asyncMigrationEntities: Record<
+    string,
+    Record<number, Promise<{ id: string }[]>>
+  > = {};
+
+  // check if any migration is relevant in this block
+  if (indexedMigrations[`${chainId}-${blockNumber}`]) {
+    // start collecting entities for migration now (this could be expensive)
+    indexedMigrations[`${chainId}-${blockNumber}`].forEach((migration, key) => {
+      asyncMigrationEntities[`${chainId}-${blockNumber}`] =
+        asyncMigrationEntities[`${chainId}-${blockNumber}`] || {};
+      asyncMigrationEntities[`${chainId}-${blockNumber}`][key] = new Promise(
+        (resolve) => {
+          resolve(
+            migration.entity &&
+              (engine.db.get(migration.entity) as Promise<{ id: string }[]>)
+          );
+        }
+      );
+    });
+  }
+
+  // record the new block
+  blocks.push({
+    chainId: +chainId,
+    number: blockNumber,
+    // start fetching these parts now, we will wait for them when we begin processing the blocks...
+    asyncParts: saveListenerBlockAndReceipts(+chainId, blockNumber),
+    // record migration entities on the block
+    asyncEntities: asyncMigrationEntities,
+  });
+};
+
+// method to cancel the block
+const cancelListenerBlockAfterTimeout = (
+  blockAndReceipts: Promise<AsyncBlockParts>
+) => {
+  // return a promise to resolve the block
+  return new Promise<void>((resolve) => {
+    // add another 60s to process the block
+    setTimeout(async () => {
+      // set cancelled on the asyncParts obj we're passing through processListenerBlock
+      (await blockAndReceipts).cancelled = true;
+      // resolve to try again
+      resolve();
+    }, 60000); // max of 60s per block - we'll adjust if needed
+  });
+};
+
+// restack this at the top so that we can try again
+const restackListenerBlock = (
+  chainId: number,
+  blockNumber: number,
+  asyncEntities: Record<
+    string,
+    Record<
+      number,
+      Promise<
+        {
+          id: string;
+        }[]
+      >
+    >
+  >,
+  blocks: {
+    chainId: number;
+    number: number;
+    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
+    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
+  }[]
+) => {
+  blocks.splice(0, 0, {
+    number: blockNumber,
+    chainId,
+    // recreate the async parts to pull everything fresh
+    asyncParts: saveListenerBlockAndReceipts(chainId, blockNumber),
+    // this shouldn't fail (but it could be empty)
+    asyncEntities,
+  });
+};
+
+// process the events from a block
+const processListenerBlockSafely = async (
+  chainId: number,
+  blockNumber: number,
+  validOps: () => Promise<Record<number, Sync[]>>,
+  asyncParts: Promise<() => Promise<AsyncBlockParts>>,
+  asyncEntities: Record<
+    string,
+    Record<
+      number,
+      Promise<
+        {
+          id: string;
+        }[]
+      >
+    >
+  >,
+  indexedMigrations: Record<string, Migration[]>,
+  blocks: {
+    chainId: number;
+    number: number;
+    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
+    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
+  }[]
+) => {
+  // get the engine
+  const engine = await getEngine();
+  // check if this block needs to be processed (check its not included in the catchup-set)
+  if (
+    engine.startBlocks[+chainId] &&
+    blockNumber >= engine.startBlocks[+chainId] &&
+    blockNumber >= engine.latestBlocks[+chainId].number
+  ) {
+    // start reading data from disk - this will pull the async data at chainId with current blocknumber
+    const blockAndReceipts = (await asyncParts)();
+    // wrap in a race here so that we never spend too long stuck on a block
+    await Promise.race([
+      // place a promise to cancel the block in 60s
+      cancelListenerBlockAfterTimeout(blockAndReceipts),
+      // attempt to resolve everything that happened in the block...
+      Promise.resolve().then(async () => {
+        try {
+          // attempt to process the block
+          await processListenerBlock(
+            +chainId,
+            // process validOps each tick to check for new syncs
+            await validOps(),
+            // blockNumber being processed...
+            blockNumber,
+            // pass through the config...
+            engine.flags.collectBlocks,
+            engine.flags.collectTxReceipts,
+            engine.flags.silent,
+            // pass through the length of the queue for reporting and for deciding if we should be saving or not
+            blocks.length,
+            // helper parts to pass through entities, block & receipts...
+            indexedMigrations,
+            asyncEntities,
+            blockAndReceipts
+          );
+          // record the new number
+          if (!(await blockAndReceipts).cancelled) {
+            engine.latestBlocks[+chainId] = {
+              number: blockNumber,
+            } as unknown as Block;
+            // always delete the  block and receipts from tmp storage - we'll never use it again
+            await deleteJSON("blockAndReceipts", `${chainId}-${+blockNumber}`);
+          } else {
+            // reattempt the timedout block
+            restackListenerBlock(chainId, blockNumber, asyncEntities, blocks);
+          }
+        } catch (e) {
+          // log the error
+          console.log(e);
+          // reattempt the failed block
+          restackListenerBlock(chainId, blockNumber, asyncEntities, blocks);
+        }
+      }),
+    ]);
+  }
+};
+
 // attach event listeners (listening for blocks)
 const attachListeners = async (
   state: {
@@ -2950,14 +3235,11 @@ const attachListeners = async (
     inSync: true,
     listening: true,
   },
+  migrations: Migration[] = [],
   errorHandlers: {
     reject?: (reason?: any) => void;
     resolve?: (value: void | PromiseLike<void>) => void;
-  } = undefined,
-  migrations: Migration[] = [],
-  collectBlocks = false,
-  collectTxReceipts = false,
-  silent = false
+  } = undefined
 ) => {
   // record the current process so that we can await its completion on close of listener
   let currentProcess: Promise<void>;
@@ -3015,142 +3297,6 @@ const attachListeners = async (
       }, {});
   };
 
-  // pull all block and receipt details (cancel attempt after 30s)
-  const saveBlockAndReceipts = async (chainId: number, blockNumber: number) => {
-    // fn to read the json from disk - if we attempt a block again, the data might be good...
-    const blockAndReceipts = readBlockAndReceipts(chainId, blockNumber);
-    // get a response (maybe)
-    const file = await blockAndReceipts();
-
-    // return the full block and receipts in 60s or cancel
-    return file && !file.cancelled && file.block && file.receipts
-      ? // file was available on disk - pass through on a callback
-        async () => file
-      : // we need to pull the data and save the file to disk...
-        Promise.resolve().then(async () => {
-          // get the full block details
-          const block = await getBlockByNumber(
-            syncProviders[+chainId],
-            blockNumber
-          );
-
-          // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-          const receipts = (
-            await Promise.all(
-              block.transactions.map(async function getReceipt(
-                tx: TransactionResponse
-              ) {
-                // this promise.all is trapped until we resolve all tx receipts in the block
-                try {
-                  // get the receipt
-                  const fullTx = await getTransactionReceipt(
-                    syncProviders[+chainId],
-                    tx
-                  );
-                  // try again
-                  if (!fullTx.transactionHash) throw new Error("Missing hash");
-
-                  // if we're tmp storing data...
-                  if (!engine.flags.cleanup) {
-                    // save each tx to disk to release from mem
-                    await saveJSON(
-                      "transactions",
-                      `${chainId}-${fullTx.transactionHash}`,
-                      fullTx as unknown as Record<string, unknown>
-                    );
-                  }
-
-                  // return the tx
-                  return fullTx;
-                } catch {
-                  // attempt to get receipt again on failure
-                  return getReceipt(tx);
-                }
-              })
-            )
-          ).reduce((all, receipt) => {
-            // combine all receipts to create an indexed lookup obj
-            return {
-              ...all,
-              [receipt.transactionHash]: receipt,
-            };
-          }, {});
-
-          // if we're tmp storing data...
-          if (!engine.flags.cleanup) {
-            // save the block for sync-cache
-            await saveJSON("blocks", `${chainId}-${+block.number}`, {
-              block,
-            });
-          }
-
-          // save everything together to reduce readback i/o (if we're using cleanup true - this is all we will save)
-          await saveJSON("blockAndReceipts", `${chainId}-${+block.number}`, {
-            block,
-            receipts,
-          });
-
-          // return a fn to read the block and all receipts in the block (this will trigger a read again)
-          return blockAndReceipts;
-        });
-  };
-
-  // read a block and its receipt from disk
-  const readBlockAndReceipts = (chainId: number, blockNumber: number) => {
-    // we're wrapping a closure with the chainId and blockNumber to be called later...
-    return async () => {
-      try {
-        const { block, receipts } = await readJSON(
-          "blockAndReceipts",
-          `${chainId}-${+blockNumber}`
-        );
-        return {
-          block,
-          receipts,
-        } as AsyncBlockParts;
-      } catch {
-        return false as unknown as AsyncBlockParts;
-      }
-    };
-  };
-
-  // record the block for the given chainId
-  const recordBlock = (chainId: number, blockNumber: number) => {
-    // store all in sparse array (as obj)
-    const asyncMigrationEntities: Record<
-      string,
-      Record<number, Promise<{ id: string }[]>>
-    > = {};
-
-    // check if any migration is relevant in this block
-    if (indexedMigrations[`${chainId}-${blockNumber}`]) {
-      // start collecting entities for migration now (this could be expensive)
-      indexedMigrations[`${chainId}-${blockNumber}`].forEach(
-        (migration, key) => {
-          asyncMigrationEntities[`${chainId}-${blockNumber}`] =
-            asyncMigrationEntities[`${chainId}-${blockNumber}`] || {};
-          asyncMigrationEntities[`${chainId}-${blockNumber}`][key] =
-            new Promise((resolve) => {
-              resolve(
-                migration.entity &&
-                  (engine.db.get(migration.entity) as Promise<{ id: string }[]>)
-              );
-            });
-        }
-      );
-    }
-
-    // record the new block
-    blocks.push({
-      chainId: +chainId,
-      number: blockNumber,
-      // start fetching these parts now, we will wait for them when we begin processing the blocks...
-      asyncParts: saveBlockAndReceipts(+chainId, blockNumber),
-      // record migration entities on the block
-      asyncEntities: asyncMigrationEntities,
-    });
-  };
-
   // attach a single listener for each provider
   const listeners = await Promise.all(
     Object.keys(syncProviders).map(async (chainId) => {
@@ -3161,7 +3307,12 @@ const attachListeners = async (
           // push to the block stack to signal the block is retrievable
           if (state.listening) {
             // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
-            recordBlock(+chainId, blockNumber);
+            await recordListenerBlock(
+              +chainId,
+              blockNumber,
+              indexedMigrations,
+              blocks
+            );
           }
         };
         // attach this listener to onBlock to start collecting blocks
@@ -3185,22 +3336,6 @@ const attachListeners = async (
     })
   );
 
-  // method to cancel the block
-  const cancelBlockAfterTimeout = (
-    blockAndReceipts: Promise<AsyncBlockParts>
-  ) => {
-    // return a promise to resolve the block
-    return new Promise<void>((resolve) => {
-      // add another 60s to process the block
-      setTimeout(async () => {
-        // set cancelled on the asyncParts obj we're passing through processBlock
-        (await blockAndReceipts).cancelled = true;
-        // resolve to try again
-        resolve();
-      }, 60000); // max of 60s per block - we'll adjust if needed
-    });
-  };
-
   // on the outside, we need to process all events emitted by the handlers to execute procedurally
   Promise.resolve()
     .then(async () => {
@@ -3211,75 +3346,16 @@ const attachListeners = async (
           // take the next block in the queue
           const [{ number: blockNumber, chainId, asyncParts, asyncEntities }] =
             blocks.splice(0, 1);
-
-          // restack this at the top so that we can try again
-          const restack = () => {
-            blocks.splice(0, 0, {
-              number: blockNumber,
-              chainId,
-              // recreate the async parts to pull everything fresh
-              asyncParts: saveBlockAndReceipts(chainId, blockNumber),
-              // this shouldn't fail (but it could be empty)
-              asyncEntities,
-            });
-          };
-
-          // check if this block needs to be processed (check its not included in the catchup-set)
-          if (
-            engine.startBlocks[+chainId] &&
-            blockNumber >= engine.startBlocks[+chainId] &&
-            blockNumber >= engine.latestBlocks[+chainId].number
-          ) {
-            // start reading data from disk - this will pull the async data at chainId with current blocknumber
-            const blockAndReceipts = (await asyncParts)();
-            // wrap in a race here so that we never spend too long stuck on a block
-            await Promise.race([
-              // place a promise to cancel the block in 60s
-              cancelBlockAfterTimeout(blockAndReceipts),
-              // attempt to resolve everything that happened in the block...
-              Promise.resolve().then(async () => {
-                try {
-                  // attempt to process the block
-                  await processBlock(
-                    +chainId,
-                    // process validOps each tick to check for new syncs
-                    await validOps(),
-                    // blockNumber being processed...
-                    blockNumber,
-                    // pass through the config...
-                    collectBlocks,
-                    collectTxReceipts,
-                    silent,
-                    // pass through the length of the queue for reporting and for deciding if we should be saving or not
-                    blocks.length,
-                    // helper parts to pass through entities, block & receipts...
-                    indexedMigrations,
-                    asyncEntities,
-                    blockAndReceipts
-                  );
-                  // record the new number
-                  if (!(await blockAndReceipts).cancelled) {
-                    engine.latestBlocks[+chainId] = {
-                      number: blockNumber,
-                    } as unknown as Block;
-                    // always delete the  block and receipts from tmp storage - we'll never use it again
-                    await deleteJSON(
-                      "blockAndReceipts",
-                      `${chainId}-${+blockNumber}`
-                    );
-                  } else {
-                    // reattempt the timedout block
-                    restack();
-                  }
-                } catch (e) {
-                  // log the error
-                  console.log(e);
-                  // reattempt the failed block
-                  restack();
-                }
-              }),
-            ]);
-          }
+          // attempt to process the events in this block...
+          await processListenerBlockSafely(
+            chainId,
+            blockNumber,
+            validOps,
+            asyncParts,
+            asyncEntities,
+            indexedMigrations,
+            blocks
+          );
         } else {
           // wait 1 second for something to enter the queue
           await new Promise((resolve) => {
@@ -3855,11 +3931,8 @@ export const sync = async ({
           // attach to listerners
           const attached = await attachListeners(
             controls,
-            errorHandler,
             migrations,
-            collectBlocks,
-            collectTxReceipts,
-            silent
+            errorHandler
           );
 
           // return a method to remove all handlers
