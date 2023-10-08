@@ -4,6 +4,9 @@ import Storage from "node-persist";
 // import env file and load contents
 import dotenv from "dotenv";
 
+// import types used by db
+import { BatchOp, Engine } from "./types";
+
 // load the .env to check NODE_ENV (only used for this purpose)
 dotenv.config();
 
@@ -20,15 +23,15 @@ export const cwd =
 export class DB {
   kv: KV;
 
-  engine?: { newDb: boolean } & Record<string, unknown>;
+  engine?: Engine;
 
   useStorage?: boolean;
 
   // construct a kv store
-  constructor(kv: KV, engine?: { newDb: boolean } & Record<string, unknown>) {
+  constructor(kv: KV, engine?: Engine) {
     // restore given kv
     this.kv = kv || {};
-    this.engine = engine || ({} as { newDb: boolean });
+    this.engine = engine || ({} as Engine);
   }
 
   static async create({
@@ -40,11 +43,11 @@ export class DB {
     kv: KV;
     name?: string;
     reset?: boolean;
-    engine?: { newDb: boolean };
+    engine?: Engine;
   } & Record<string, unknown>) {
     const db = new this(kv, engine);
     await db.update({ kv, name, reset });
-    return db;
+    return db as DB & Record<string, any>;
   }
 
   async update({
@@ -145,13 +148,7 @@ export class DB {
     return false;
   }
 
-  async batch(
-    vals: {
-      type: "put" | "del";
-      key: string;
-      value?: Record<string, unknown>;
-    }[]
-  ) {
+  async batch(vals: BatchOp[]) {
     await Promise.all(
       vals.map(async (val) => {
         const [ref, id] = val.key.split(".");

@@ -105,6 +105,18 @@ describe("Mongo", () => {
     );
   });
 
+  it("should prevent put using the put method if engine is in readOnly mode", async () => {
+    // connect to the mockClient
+    const db = new Mongo(mockClient, "testDb", {}, false, { readOnly: true });
+    // put an entry
+    await db.put("exampleRef.id1", {
+      id: "id1",
+      data: "new-value",
+    });
+    // expect to have attempt a query
+    expect(mockCollection.replaceOne).not.toHaveBeenCalled();
+  });
+
   it("should perform batch operations", async () => {
     const db = new Mongo(mockClient, "testDb", {});
 
@@ -176,5 +188,30 @@ describe("Mongo", () => {
         forceServerObjectId: true,
       }
     );
+  });
+  
+  it("should prevent batch operations if engine is in readOnly mode", async () => {
+    const db = new Mongo(mockClient, "testDb", {}, false, { readOnly: true });
+  
+    const batchData: {
+      type: "put" | "del";
+      key: string;
+      value?: Record<string, unknown>;
+    }[] = [
+      {
+        type: "put",
+        key: "exampleRef.id1",
+        value: { id: "id1", data: "value1" },
+      },
+      {
+        type: "put",
+        key: "exampleRef.id2",
+        value: { id: "id2", data: "value2" },
+      },
+      { type: "del", key: "exampleRef.id3" },
+    ];
+    await db.batch(batchData);
+  
+    expect(mockCollection.bulkWrite).not.toHaveBeenCalled();
   });
 });

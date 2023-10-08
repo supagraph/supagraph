@@ -36,6 +36,16 @@ export type Engine = {
   readOnly?: boolean;
   lastUpdate?: number;
   syncs?: Sync[];
+  syncOps?: {
+    syncs?: Sync[];
+    meta?: Entity<{
+      id: string;
+      syncOps: SyncOp[];
+    }> & {
+      id: string;
+      syncOps: SyncOp[];
+    };
+  };
   promiseQueue?: (
     | Promise<unknown>
     | ((stack?: (() => Promise<any>)[]) => Promise<unknown>)
@@ -77,6 +87,13 @@ export type Migration = {
     chainId?: number,
     entity?: Entity<{ id: string }>
   ) => Promise<void> | void;
+};
+
+// describes a batch operation
+export type BatchOp = {
+  type: "put" | "del";
+  key: string;
+  value?: Record<string, unknown>;
 };
 
 // Define recordable syncOp type
@@ -254,15 +271,4 @@ export type AsyncBlockParts = {
   cancelled?: boolean;
   block: BlockWithTransactions;
   receipts: Record<string, TransactionReceipt>;
-  syncOpsEntity: {
-    current:
-      | (Entity<{
-          id: string;
-          syncOps: SyncOp[];
-        }> & {
-          id: string;
-          syncOps: SyncOp[];
-        })
-      | false;
-  };
 };

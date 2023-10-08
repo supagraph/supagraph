@@ -3,6 +3,7 @@ import type { AnyBulkWriteOperation, Document, MongoClient } from "mongodb";
 
 // Extend from db (abstract-leveldown compatible kv implementation)
 import { DB } from "./db";
+import { BatchOp, Engine } from "./types";
 
 // This should probably just be string - Record<string, string | number | Buffer> (or anything else which is valid in a mongo setting)
 type KV = Record<string, Record<string, Record<string, unknown> | null>>;
@@ -32,16 +33,13 @@ export class Mongo extends DB {
   // are the entities in this db being upserted or not?
   mutable: boolean;
 
-  // associated engine (which contains this db)
-  declare engine?: { newDb: boolean } & Record<string, unknown>;
-
   // construct a kv store
   constructor(
     client: MongoClient | Promise<MongoClient>,
     name: string,
     kv: KV,
     mutable?: boolean,
-    engine?: { newDb: boolean } & Record<string, unknown>
+    engine?: Engine
   ) {
     // init super
     super(kv, engine);
@@ -52,7 +50,7 @@ export class Mongo extends DB {
     // are the ids unique?
     this.mutable = mutable || false;
     // associate the engine
-    this.engine = engine || ({} as { newDb: boolean });
+    this.engine = engine || ({} as Engine);
     // resolve the client then attach the named db
     this.db = Promise.resolve(client).then((mongo) =>
       mongo.db(name || "supagraph")
@@ -66,38 +64,37 @@ export class Mongo extends DB {
     kv,
     mutable,
     engine,
-    reset,
   }: {
     client: MongoClient | Promise<MongoClient>;
     name: string;
     kv: KV;
     mutable?: boolean;
-    engine?: { newDb: boolean; warmDb: boolean } & Record<string, unknown>;
-    reset?: boolean;
+    engine?: Engine;
   } & Record<string, unknown>) {
     const db = new this(client, name, kv, mutable, engine);
-    await db.update({ kv, name, reset });
+    await db.update({ kv });
     return db;
   }
 
-  // update the kv store with a new set of values
-  async update({
-    kv,
-    name,
-    reset,
-  }: { kv: KV; name?: string; reset?: boolean } & Record<string, unknown>) {
-    // await the update on super
-    return super.update({
-      kv,
-      name,
-      reset,
-    });
+  // update the kv store with a new set of values (we're not starting node-persist here)
+  async update({ kv }: { kv: KV } & Record<string, unknown>) {
+    // use given kv
+    const kvs = { ...kv };
+    // restore the kv store
+    this.kv = kvs;
   }
 
   // get from mongodb
   async get(key: string) {
     // otherwise spit the key and get from mongo
     const [ref, id] = key.split(".");
+
+    // TODO: the hotpath here is usually checking on things which don't exist in the db
+    //  - we've solved for this in one implementation by loading everything in to memory and setting engine.warmDb [to prevent db reads], but this has a mem limit...
+    //  - we could have a system here to record only the index and store that in mem (btree + bloomfilters), but even that could reach mem limits...
+    //  - when we start nearing limits we could move the btree to disk and continue there (depending on depth this could require several reads to seek by key)
+    //  - alternatively we can perist everything to disk by key and we can refrain from doing any seeks by range etc - this will require local storage space the same size as the db medium
+    //  - or we give up on using a db persistance layer and store everything locally - this would mean stateful deployments/a connected persistence medium - i/o could still be a constraint.
 
     // check in runtime cache
     if (ref && id) {
@@ -130,47 +127,34 @@ export class Mongo extends DB {
     ) {
       // update the materialised view for immutable collection...
       if (!this.mutable && ref !== "__meta__") {
-        (await Promise.resolve(this.db)).collection(ref).aggregate([
-          {
-            $sort: {
-              _block_ts: -1,
-            },
-          },
-          {
-            $group: {
-              _id: "$id",
-              latestDocument: {
-                $first: "$$ROOT",
+        return (await Promise.resolve(this.db))
+          .collection(ref)
+          .aggregate([
+            {
+              $sort: {
+                _block_ts: -1,
               },
             },
-          },
-          {
-            $replaceRoot: { newRoot: "$latestDocument" },
-          },
-          // we need the _id to be unique but represent the item
-          {
-            $addFields: {
-              _id: "$id",
+            {
+              $group: {
+                _id: "$id",
+                latestDocument: {
+                  $first: "$$ROOT",
+                },
+              },
             },
-          },
-          {
-            $merge: {
-              into: `${ref}_snapshot`,
-              on: "_id",
-              whenMatched: "replace",
-              whenNotMatched: "insert",
+            {
+              $replaceRoot: { newRoot: "$latestDocument" },
             },
-          },
-        ]);
+          ])
+          .toArray();
       }
 
       // this wants to get only the most recent insertions
       return (
         (await Promise.resolve(this.db))
           // if we're immutable then get from the materialised view
-          .collection(
-            ref + (!this.mutable && ref !== "__meta__" ? "_snapshot" : "")
-          )
+          .collection(ref)
           .find({})
           .toArray()
       );
@@ -267,13 +251,7 @@ export class Mongo extends DB {
   }
 
   // perfom a bulkWrite against mongodb
-  async batch(
-    vals: {
-      type: "put" | "del";
-      key: string;
-      value?: Record<string, unknown>;
-    }[]
-  ) {
+  async batch(vals: BatchOp[]) {
     // collect every together into appropriate collections
     const byCollection = vals.reduce((collection, val) => {
       // avoid reassigning props of param error
@@ -355,10 +333,10 @@ export class Mongo extends DB {
         }
         // returns all Document operations
         return operations;
-      }, [] as unknown as AnyBulkWriteOperation<Document>[]);
+      }, [] as AnyBulkWriteOperation<Document>[]);
 
       // save the batch to mongo
-      if (!this.engine.readOnly) {
+      if (!this.engine.readOnly && batch.length) {
         // eslint-disable-next-line no-await-in-loop
         await (await Promise.resolve(this.db))
           .collection(collection)

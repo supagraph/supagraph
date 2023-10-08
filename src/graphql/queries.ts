@@ -1,4 +1,3 @@
-/* eslint-disable no-nested-ternary, no-underscore-dangle, no-restricted-syntax */
 /* eslint-disable no-await-in-loop, @typescript-eslint/naming-convention */
 import {
   Key,
