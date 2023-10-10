@@ -228,50 +228,79 @@ export const processListenerBlock = async (
   const parts = await asyncParts;
 
   // unpack the async parts  - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-  const { block, receipts, cancelled } = parts;
+  const { block, receipts, cancelled } = parts || {};
 
-  // set the chainId into the engine
-  Store.setChainId(chainId);
-  // set the block for each operation into the engine before we run the handler
-  Store.setBlock(block);
+  // check that we havent cancelled this operation
+  if (!cancelled && block && receipts) {
+    // set the chainId into the engine
+    Store.setChainId(chainId);
+    // set the block for each operation into the engine before we run the handler
+    Store.setBlock(block);
 
-  // check if any migration is relevant in this block
-  if (migrations[`${chainId}-${+block.number}`]) {
-    // start collecting entities for migration now (this could be expensive - track by index to associate migrationEntities)
-    for (const migrationKey of Object.keys(
-      migrations[`${chainId}-${+block.number}`]
-    )) {
-      const migration = migrations[`${chainId}-${+block.number}`][migrationKey];
-      // check for entity
-      if (migration.entity) {
-        // pull all entities
-        const entities = await migrationEntities[`${chainId}-${+block.number}`][
-          migrationKey
-        ];
-        // push a new event for each entity in the migration
-        entities.forEach((entity) => {
-          // record this migration event with this entity
+    // check if any migration is relevant in this block
+    if (migrations[`${chainId}-${+block.number}`]) {
+      // start collecting entities for migration now (this could be expensive - track by index to associate migrationEntities)
+      for (const migrationKey of Object.keys(
+        migrations[`${chainId}-${+block.number}`]
+      )) {
+        // ref the migration
+        const migration =
+          migrations[`${chainId}-${+block.number}`][migrationKey];
+        // check for entity
+        if (migration.entity) {
+          // pull all entities
+          const entities = await migrationEntities[
+            `${chainId}-${+block.number}`
+          ][migrationKey];
+          // push a new event for each entity in the migration
+          entities.forEach((entity) => {
+            // record this migration event with this entity
+            events.push({
+              id: `${chainId}`,
+              chainId,
+              type: "migration",
+              provider: undefined as unknown as JsonRpcProvider,
+              name: `migration-${migration.chainId}-${migration.blockNumber}`,
+              startBlock: migration.blockNumber,
+              onEvent: migration.handler as unknown as Migration["handler"],
+              // @ts-ignore
+              data: {
+                blockNumber: migration.blockNumber,
+                entity: new Entity<typeof entity>(migration.entity, entity.id, [
+                  ...Object.keys(entity).map((key) => {
+                    return new TypedMapEntry(
+                      key as keyof typeof entity,
+                      entity[key]
+                    );
+                  }),
+                ]),
+                // set entityName for callback recall
+                entityName: migration.entity,
+              } as unknown as Event,
+              blockNumber: +block.number,
+              eventName: "migration",
+              args: [],
+              tx: {} as TransactionReceipt & TransactionResponse,
+              // onBlock first
+              txIndex: -2,
+              logIndex: -2,
+            });
+          });
+          // delete the migrations entities after constructing the events
+          delete migrationEntities[`${chainId}-${+block.number}`][migrationKey];
+        } else {
+          // push a version without entities if entities is false
           events.push({
             id: `${chainId}`,
-            chainId,
             type: "migration",
-            provider: undefined as unknown as JsonRpcProvider,
+            chainId,
+            provider: await getProvider(chainId),
             name: `migration-${migration.chainId}-${migration.blockNumber}`,
             startBlock: migration.blockNumber,
             onEvent: migration.handler as unknown as Migration["handler"],
             // @ts-ignore
             data: {
               blockNumber: migration.blockNumber,
-              entity: new Entity<typeof entity>(migration.entity, entity.id, [
-                ...Object.keys(entity).map((key) => {
-                  return new TypedMapEntry(
-                    key as keyof typeof entity,
-                    entity[key]
-                  );
-                }),
-              ]),
-              // set entityName for callback recall
-              entityName: migration.entity,
             } as unknown as Event,
             blockNumber: +block.number,
             eventName: "migration",
@@ -281,39 +310,12 @@ export const processListenerBlock = async (
             txIndex: -2,
             logIndex: -2,
           });
-        });
-        // delete the migrations entities after constructing the events
-        delete migrationEntities[`${chainId}-${+block.number}`][migrationKey];
-      } else {
-        // push a version without entities if entities is false
-        events.push({
-          id: `${chainId}`,
-          type: "migration",
-          chainId,
-          provider: await getProvider(chainId),
-          name: `migration-${migration.chainId}-${migration.blockNumber}`,
-          startBlock: migration.blockNumber,
-          onEvent: migration.handler as unknown as Migration["handler"],
-          // @ts-ignore
-          data: {
-            blockNumber: migration.blockNumber,
-          } as unknown as Event,
-          blockNumber: +block.number,
-          eventName: "migration",
-          args: [],
-          tx: {} as TransactionReceipt & TransactionResponse,
-          // onBlock first
-          txIndex: -2,
-          logIndex: -2,
-        });
+        }
       }
+      // clean up migrations after adding events
+      delete migrations[`${chainId}-${+block.number}`];
     }
-    // clean up migrations after adding events
-    delete migrations[`${chainId}-${+block.number}`];
-  }
 
-  // check that we havent cancelled this operation
-  if (!cancelled) {
     // run through the ops and extract all events happening in this block to be sorted into logIndex order
     for (const op of validOps[chainId]) {
       // make sure endblock is respected

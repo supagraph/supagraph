@@ -96,8 +96,10 @@ export const attemptNextBlock = async (
 
   // extract the chainId we will be operating on
   const chainId = +blockQueue[0].chainId;
+
   // check that this block follows the last completed block sequentially
   const latestBlock = engine.latestBlocks[chainId];
+
   // if the gap is greater than one then...
   if (blockQueue[0].number - latestBlock.number > 1) {
     // start from the latestBlocks blockNumber...
@@ -192,7 +194,6 @@ export const attachListeners = async (
 
         // attach this listener to onBlock to start collecting blocks
         syncProviders[+chainId].on("block", listener);
-
         // attach close to error handler
         syncProviders[+chainId].on("error", handler);
 
@@ -226,7 +227,7 @@ export const attachListeners = async (
       while (state.listening) {
         // once the state moves to inSync - we can start taking blocks from the array to process
         if (blockQueue.length && state.inSync) {
-          // take the next block from the challenge queue
+          // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
           await attemptNextBlock(blockQueue, indexedMigrations);
         } else {
           // wait 1 second for something to enter the queue
@@ -263,15 +264,13 @@ export const getValidSyncOps: () => Promise<
   return Object.keys(networks.syncProviders)
     .map((chainId) => {
       // filter for ops associated with this chainid
-      const ops = engine.syncs.filter(
-        (op) =>
-          // is for chainId
-          op.provider.network.chainId === +chainId
-      );
-
       return {
         chainId: +chainId,
-        validOps: ops,
+        validOps: engine.syncs.filter(
+          (op) =>
+            // is for chainId
+            op.provider.network.chainId === +chainId
+        ),
       };
     })
     .reduce((all, op) => {
@@ -286,14 +285,16 @@ export const getValidSyncOps: () => Promise<
 export const getReceipt = async (
   tx: TransactionResponse,
   chainId: number,
-  provider: JsonRpcProvider
+  provider: JsonRpcProvider | WebSocketProvider
 ) => {
   // retrieve the engine to check flags
   const engine = await getEngine();
+
   // this promise.all is trapped until we resolve all tx receipts in the block
   try {
     // get the receipt
     const fullTx = await getTransactionReceipt(provider, tx);
+
     // try again
     if (!fullTx.transactionHash) throw new Error("Missing hash");
 
@@ -315,14 +316,16 @@ export const getReceipt = async (
   }
 };
 
-// await collection of the block and receipt, saving to disk, then return a fn to read back the data from disk
-export const awaitListenerBlockAndReceipts = async (
+// pull all block and receipt details (cancel attempt after 30s)
+export const saveListenerBlockAndReceipts = async (
   number: number,
-  chainId: number,
-  syncProviders: Record<number, JsonRpcProvider | WebSocketProvider>
+  chainId: number
 ) => {
   // retrieve engine
   const engine = await getEngine();
+
+  // get all chainIds for defined networks
+  const { syncProviders } = await getNetworks();
 
   // get the full block details
   const block = await getBlockByNumber(syncProviders[+chainId], number);
@@ -357,18 +360,6 @@ export const awaitListenerBlockAndReceipts = async (
   });
 };
 
-// pull all block and receipt details (cancel attempt after 30s)
-export const saveListenerBlockAndReceipts = async (
-  number: number,
-  chainId: number
-) => {
-  // get all chainIds for defined networks
-  const { syncProviders } = await getNetworks();
-
-  // return the full block and receipts in 60s or cancel
-  return awaitListenerBlockAndReceipts(number, chainId, syncProviders);
-};
-
 // read a block and its receipt from disk
 export const readListenerBlockAndReceipts = async (
   number: number,
@@ -380,6 +371,7 @@ export const readListenerBlockAndReceipts = async (
       "blockAndReceipts",
       `${chainId}-${+number}`
     );
+
     return {
       block,
       receipts,
@@ -427,16 +419,16 @@ export const recordListenerBlock = async (
   }
 
   // record the new block
-  blockQueue.push({
+  stackListenerBlock(
     number,
-    chainId: +chainId,
-    // start fetching these parts now, we will wait for them when we begin processing the blocks...
-    asyncParts: saveListenerBlockAndReceipts(number, chainId).then(() => {
-      return () => readListenerBlockAndReceipts(number, chainId);
-    }),
+    chainId,
     // record migration entities on the block
-    asyncEntities: asyncMigrationEntities,
-  });
+    asyncMigrationEntities,
+    // pass in the full queue to stack against
+    blockQueue,
+    // position at the end of the queue
+    blockQueue.length
+  );
 };
 
 // stop waiting for a read action
@@ -469,8 +461,8 @@ const cancelOp = async (
 const cancelListenerBlockAfterTimeout = async (
   blockAndReceipts: Promise<AsyncBlockParts>,
   timeout: number = 30000,
-  ref: {
-    current?: NodeJS.Timeout;
+  cancelRef: {
+    timeout?: NodeJS.Timeout;
     resolve?: () => void;
     resolver?: (
       blockAndReceipts: Promise<AsyncBlockParts>,
@@ -481,16 +473,16 @@ const cancelListenerBlockAfterTimeout = async (
   // return a promise to resolve the cancelation on the provided vals
   return new Promise<void>((resolve) => {
     // store the resolver
-    ref.resolver = cancelOp;
+    cancelRef.resolver = cancelOp;
     // attach caller to the ref
-    ref.resolve = () => ref.resolver(blockAndReceipts, resolve);
+    cancelRef.resolve = () => cancelRef.resolver(blockAndReceipts, resolve);
     // add another 60s to process the block
-    ref.current = setTimeout(ref.resolve, Math.max(timeout, 10000)); // min of 10s per block, default of 30s - we'll adjust if needed
+    cancelRef.timeout = setTimeout(cancelRef.resolve, Math.max(timeout, 10000)); // min of 10s per block, default of 30s - we'll adjust if needed
   });
 };
 
 // restack this at the top so that we can try again
-const restackListenerBlock = (
+const stackListenerBlock = (
   number: number,
   chainId: number,
   asyncEntities: Record<
@@ -509,9 +501,11 @@ const restackListenerBlock = (
     number: number;
     asyncParts: Promise<() => Promise<AsyncBlockParts>>;
     asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[]
+  }[],
+  position: number
 ) => {
-  blockQueue.splice(0, 0, {
+  // splice on to the blockQueue at the provided position
+  blockQueue.splice(position, 0, {
     number,
     chainId,
     // recreate the async parts to pull everything fresh
@@ -538,7 +532,7 @@ export const startProcessingBlock = async (
   asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>,
   blockAndReceipts: Promise<AsyncBlockParts>,
   cancelRef: {
-    current?: NodeJS.Timeout;
+    timeout?: NodeJS.Timeout;
     resolve?: () => void;
     resolver?: (
       blockAndReceipts: Promise<AsyncBlockParts>,
@@ -546,7 +540,10 @@ export const startProcessingBlock = async (
     ) => void;
   }
 ) => {
+  // using the engine to access flags
   const engine = await getEngine();
+
+  // wrapped so that we can reattempt if we see any errors
   try {
     // attempt to process the block
     await processListenerBlock(
@@ -567,6 +564,22 @@ export const startProcessingBlock = async (
       asyncEntities,
       blockAndReceipts
     );
+  } catch (e) {
+    // log the error
+    console.log(e);
+    // mark the failed block as cancelled and cleanup
+    blockAndReceipts = blockAndReceipts.then((vals: AsyncBlockParts) => {
+      // if theres no place data default to empty obj
+      if (!vals) {
+        vals = {} as AsyncBlockParts;
+      }
+      // place by ref incase anything is still ongoing
+      vals.cancelled = true;
+
+      // return vals with cancellation in place
+      return vals;
+    });
+  } finally {
     // if any of this cleanup logic throws we don't need to do anything with the error...
     try {
       // final await on the block and receipts
@@ -574,41 +587,35 @@ export const startProcessingBlock = async (
       // clear timeout to prevent cancellation
       if (typeof cancelRef.resolver !== "undefined") {
         // clear the timeout to prevent calling the handler
-        clearTimeout(cancelRef.current);
+        clearTimeout(cancelRef.timeout);
         // set the resolver but don't clear the timeout because we want it to resolve its promise
         cancelRef.resolver = (_, resolve) => {
           // mark for g/c
           delete cancelRef.resolve;
           delete cancelRef.resolver;
-          delete cancelRef.current;
-          // resolve the promise
+          delete cancelRef.timeout;
+          // resolve the promise to clear ref
           resolve();
         };
       }
-      // record the new number
-      if (vals?.cancelled) {
+      // restack the request if any parts we're missing
+      if (!vals || vals?.cancelled || !vals?.block || !vals?.receipts) {
         // reattempt the timedout block
-        restackListenerBlock(number, chainId, asyncEntities, blockQueue);
+        stackListenerBlock(number, chainId, asyncEntities, blockQueue, 0);
+      } else {
+        // delete cancelled marker
+        delete vals?.cancelled;
+        // delete details from the wrapper
+        delete vals?.block;
+        delete vals?.receipts;
       }
-      // delete cancelled marker
-      delete vals?.cancelled;
-      // delete from details from the wrapper
-      delete vals?.block;
-      delete vals?.receipts;
     } finally {
       // clear the cancelListenerBlockAfterTimeout promise (by resolving it now)
       if (typeof cancelRef.resolver !== "undefined") {
         // call resovle to clear the promise after completing this callback
         setTimeout(cancelRef.resolve);
       }
-      // unref the content of the promise
-      await blockAndReceipts.then(() => null);
     }
-  } catch (e) {
-    // log the error
-    console.log(e);
-    // reattempt the failed block
-    restackListenerBlock(number, chainId, asyncEntities, blockQueue);
   }
 };
 
