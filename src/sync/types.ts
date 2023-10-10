@@ -1,17 +1,21 @@
+// Import required types from ethers
 import type {
-  TransactionReceipt,
-  TransactionResponse,
   Block,
   BlockWithTransactions,
+  TransactionReceipt,
+  TransactionResponse,
 } from "@ethersproject/abstract-provider";
 import type {
   JsonRpcProvider,
   WebSocketProvider,
 } from "@ethersproject/providers";
 import type { ethers, providers } from "ethers";
-import type { DB } from "./db";
-import type { Stage } from "./stage";
-import type { Entity } from "./store";
+
+// import persistence layer types
+import type { DB, Stage, Entity } from "@/sync/tooling/persistence";
+
+// This should probably just be string - Record<string, string | number | Buffer> (or anything else which is valid in a mongo setting)
+export type KV = Record<string, Record<string, Record<string, unknown> | null>>;
 
 // Allow for stages to be skipped via config
 export enum SyncStage {
@@ -34,6 +38,7 @@ export type Engine = {
   newDb?: boolean;
   warmDb?: boolean;
   readOnly?: boolean;
+  concurrency?: number;
   lastUpdate?: number;
   syncs?: Sync[];
   syncOps?: {
@@ -168,6 +173,8 @@ export type SyncConfig = {
   silent?: boolean;
   // set readOnly on the engine via config
   readOnly?: boolean;
+  // how many rpc reqs/promises to attempt concurrently
+  concurrency?: number;
   // global tx/block capture
   collectBlocks?: boolean;
   collectTxReceipts?: boolean;
@@ -217,6 +224,7 @@ export type SyncEvent = {
   args?: ethers.utils.Result;
   tx?: TransactionReceipt & TransactionResponse;
   txIndex?: number;
+  migrationKey?: number;
   onEvent?: Migration["handler"];
 };
 

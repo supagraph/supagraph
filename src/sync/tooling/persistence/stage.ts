@@ -1,8 +1,8 @@
-// Stage will extend DB to hold local state before it is commited to the constructed DB (on commit)
-import { DB } from "./db";
-
 // import types used by Stage
-import { BatchOp } from "./types";
+import { BatchOp } from "@/sync/types";
+
+// Stage will extend DB to hold local state before it is commited to the constructed DB (on commit)
+import { DB } from "@/sync/tooling/persistence/db";
 
 // Store any ops during checkpoint into keyValueMap to execute on parent later
 export type Checkpoint = {

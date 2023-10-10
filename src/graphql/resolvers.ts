@@ -9,7 +9,7 @@ import {
   SimpleSchema,
 } from "./types";
 
-import { DB } from "../sync/db";
+import { DB } from "../sync/tooling/persistence/db";
 import { toCamelCase } from "../utils/toCamelCase";
 import {
   generateIndexes,

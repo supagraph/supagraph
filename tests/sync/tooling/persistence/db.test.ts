@@ -1,4 +1,4 @@
-import { DB } from "../../src/sync/db";
+import { DB, NotFound } from "@/sync/tooling/persistence/db";
 
 // Mock dotenv.config() since it's not related to testing DB class
 jest.mock("dotenv", () => ({
@@ -38,6 +38,14 @@ describe("DB", () => {
 
     const value = await db.get("exampleRef.id1");
     expect(value).toEqual({ data: "value1" });
+  });
+
+  it("should throw an error if value doesnt exist", async () => {
+    const db = new DB({});
+    db.kv = {};
+
+    // expect error to be thrown
+    expect(async () => await db.get("exampleRef.id1")).rejects.toThrowError(NotFound);
   });
 
   it("should put a value using the put method", async () => {

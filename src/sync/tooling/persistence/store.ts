@@ -1,17 +1,20 @@
 // Each Entity is store as TypedMap holding TypedMapEntries
 import { Block } from "@ethersproject/providers";
-
 import { BigNumber } from "ethers";
-import { TypedMap } from "./typedMap";
-import { TypedMapEntry } from "./typedMapEntry";
+
+// Convert collection refs to toCamelCase
+import { toCamelCase } from "@/utils/toCamelCase";
+
+// Import persistance tooling to construct Type Maps
+import { TypedMap } from "@/sync/tooling/persistence/typedMap";
+import { TypedMapEntry } from "@/sync/tooling/persistence/typedMapEntry";
 
 // Store can use either in-memory or mongo as a driver
-import { DB } from "./db";
-import { Stage } from "./stage";
+import { DB } from "@/sync/tooling/persistence/db";
+import { Stage } from "@/sync/tooling/persistence/stage";
 
-// convert collection refs to toCamelCase
-import { toCamelCase } from "../utils/toCamelCase";
-import { Engine } from "./types";
+// Construct engine here to prevent circular references - we need to access the static engine inside the static Store
+import { Engine } from "@/sync/types";
 
 // create a global to store in-memory engine for duration of request
 const engine: Engine = ((global as typeof global & { engine: Engine }).engine =

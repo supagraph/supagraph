@@ -67,7 +67,7 @@ export function serializeObject(outputValue: unknown): unknown {
 export const GraphQLBigIntConfig: GraphQLScalarTypeConfig<
   bigint,
   bigint | typeof BigInt | string | number
-> = /* #__PURE__ */ {
+> = {
   name: "BigInt",
   description:
     "The `BigInt` scalar type represents non-fractional signed whole numeric values.",

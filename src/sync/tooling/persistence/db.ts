@@ -1,29 +1,32 @@
-// Database store backed by node-persist (this could be replace with something like sqlite)
-import Storage from "node-persist";
-
-// import env file and load contents
+// Import env file and load contents
 import dotenv from "dotenv";
 
-// import types used by db
-import { BatchOp, Engine } from "./types";
+// Import types used by db
+import { BatchOp, Engine, KV } from "@/sync/types";
+import { cwd } from "@/sync/tooling/persistence/disk";
+
+// Import node-persist to power the local db store (this could be replace with something like sqlite)
+import Storage from "node-persist";
 
 // load the .env to check NODE_ENV (only used for this purpose)
 dotenv.config();
 
-// this should probably just be string - Record<string, string | number | string> (or anything else which is valid in a mongo setting)
-type KV = Record<string, Record<string, Record<string, unknown> | null>>;
+// Error to throw with a .notFound prop set to true
+export class NotFound extends Error {
+  notFound: boolean;
 
-// working directory of the calling project or tmp if in prod
-export const cwd =
-  process.env.NODE_ENV === "development"
-    ? `${process.cwd()}/data/`
-    : "/tmp/data-"; // we should use /tmp/ on prod for an ephemeral store during the execution of this process (max 512mb of space)
+  constructor(msg: string) {
+    super(msg);
+    // mark as notFound
+    this.notFound = true;
+  }
+}
 
 // Simple key-value database store (abstract-leveldown compliantish)
 export class DB {
   kv: KV;
 
-  engine?: Engine;
+  engine: Engine;
 
   useStorage?: boolean;
 
@@ -105,7 +108,8 @@ export class DB {
       if (val) return Object.values(val);
     }
 
-    return null;
+    // throw not found to indicate we can't find it
+    throw new NotFound("Not Found");
   }
 
   async put(key: string, val: Record<string, unknown>) {

@@ -1,4 +1,4 @@
-import { TypedMapEntry } from "../../src/sync/typedMapEntry";
+import { TypedMapEntry } from "@/sync/tooling/persistence/typedMapEntry";
 
 describe("TypedMapEntry", () => {
   it("should create an instance with correct key and value", () => {

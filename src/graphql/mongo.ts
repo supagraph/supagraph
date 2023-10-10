@@ -1016,6 +1016,51 @@ export function generateIndexes(schema: SimpleSchema, entity: string) {
   return indexes;
 }
 
+// construct the query parts
+export function getMaterialisedViewQuery(
+  entity: string,
+  all: Record<string, { collection: string; aggregate: unknown[] }>
+) {
+  // camelCase the provided entity name
+  const camelCaseEntity = toCamelCase(entity.replace(/\[|\]|!/g, ""));
+  // place the query against the entity name - this will update a view of the collection with the result of the group & projection
+  all[camelCaseEntity] = {
+    collection: camelCaseEntity,
+    aggregate: [
+      {
+        $sort: {
+          _block_ts: -1,
+        },
+      },
+      {
+        $group: {
+          _id: "$id",
+          latestDocument: {
+            $first: "$$ROOT",
+          },
+        },
+      },
+      {
+        $replaceRoot: { newRoot: "$latestDocument" },
+      },
+      // we need the _id to be unique but represent the item
+      {
+        $addFields: {
+          _id: "$id",
+        },
+      },
+      {
+        $merge: {
+          into: `${camelCaseEntity}_snapshot`,
+          on: "_id",
+          whenMatched: "replace",
+          whenNotMatched: "insert",
+        },
+      },
+    ],
+  };
+}
+
 // construct a set of calls to be made to build materialisedViews
 export function createMaterialisedViews(
   schema: SimpleSchema,
@@ -1039,74 +1084,41 @@ export function createMaterialisedViews(
     // extract any additional fields defined in the args.where that might not be defined in the response query
     const argFields = collateWheres(schema, entity, ast, usePath, map);
 
-    // for each entity on the query we need to create a join...
-    return {
-      ...Array.from(new Set([...entityFields, ...argFields]))
-        // exclude any fields not mentioned in the query
-        .filter(
-          (v) =>
-            v && (fields.indexOf(v.name) !== -1 || argFields.indexOf(v) !== -1)
-        )
-        // map the lookup keeping track of the dotDelim path of the parent entity
-        .reduce((all, vals) => {
-          // dot-delim path of current entity
-          const path = entity ? `${entity}.${vals.name}` : vals.name;
-          // this needs to be recursive to keep the full tree rendered (but we should push items to an injected array)
-          all[toCamelCase(vals.type.replace(/\[|\]|!/g, ""))] = {
-            collection: toCamelCase(vals.type.replace(/\[|\]|!/g, "")),
-            aggregate: [
-              {
-                $sort: {
-                  _block_ts: -1,
-                },
-              },
-              {
-                $group: {
-                  _id: "$id",
-                  latestDocument: {
-                    $first: "$$ROOT",
-                  },
-                },
-              },
-              {
-                $replaceRoot: { newRoot: "$latestDocument" },
-              },
-              // we need the _id to be unique but represent the item
-              {
-                $addFields: {
-                  _id: "$id",
-                },
-              },
-              {
-                $merge: {
-                  into: `${toCamelCase(
-                    vals.type.replace(/\[|\]|!/g, "")
-                  )}_snapshot`,
-                  on: "_id",
-                  whenMatched: "replace",
-                  whenNotMatched: "insert",
-                },
-              },
-            ],
-          };
+    // collect views from this layer
+    const views: Record<string, { collection: string; aggregate: unknown[] }> =
+      {};
 
-          // collate all
-          return {
-            ...all,
-            // collect from next level (following path)
-            ...createMaterialisedViews(
-              schema,
-              entity,
-              mutable,
-              ast,
-              path || "",
-              map
-            ),
-          };
-        }, {} as Record<string, { collection: string; aggregate: unknown[] }>),
-    };
+    // place a query to create/update a materialised view based on the entity
+    getMaterialisedViewQuery(entity, views);
+
+    // get nested/referenced views which need to be rendered (place everything here)
+    Array.from(new Set([...entityFields, ...argFields]))
+      // exclude any fields not mentioned in the query
+      .filter(
+        (v) =>
+          // filter if the key isnt part of the fieldKeys or one of the argFields
+          v && (fields.indexOf(v.name) !== -1 || argFields.indexOf(v) !== -1)
+      )
+      // map the lookup keeping track of the dotDelim path of the parent entity
+      .reduce((all, vals) => {
+        // dot-delim path of current entity
+        const path = `${usePath || entity}.${vals.name}`;
+        // extract the type and clean it of any arr markers
+        const type = vals.type.replace(/\[|\]|!/g, "");
+
+        // this needs to be recursive to keep the full tree rendered
+        return {
+          ...all,
+          // collect from next level (following path)
+          ...createMaterialisedViews(schema, type, mutable, ast, path, map),
+        };
+      }, views);
+
+    // return all collection refs against a query to place the materialised view
+    return views;
   }
 
+  // nothing to render
   return {};
 }
 

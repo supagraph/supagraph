@@ -12,11 +12,21 @@
     "outDir": "./dist",
     "baseUrl": ".",
     "paths": {
-      "@*": ["./src/*"]
+      "@/*": ["./src/*"]
     },
+    "plugins": [
+      // transform paths in output .js files
+      { "transform": "typescript-transform-paths" },
+      // transform paths in output .d.ts files
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ]
   },
   "include": [
-    "./src/**/*"
+    "./src/**/*",
+    "./tests/**/*"
   ],
   "exclude": ["node_modules"]
 }

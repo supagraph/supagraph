@@ -1,5 +1,7 @@
 import { MongoClient, Collection, Document } from "mongodb";
-import { Mongo } from "../../src/sync/mongo";
+
+import { Mongo } from "@/sync/tooling/persistence/mongo";
+import { NotFound } from "@/sync/tooling/persistence/db";
 
 // Mock the mongodb methods and classes
 jest.mock("mongodb");
@@ -11,24 +13,21 @@ describe("Mongo", () => {
 
   beforeEach(() => {
     // Create mock instances for each test
-    mockDb = {
-      collection: jest.fn(),
-    } as unknown as ReturnType<MongoClient["db"]>;
-
     mockCollection = {
-      findOne: jest.fn(),
+      findOne: jest.fn(() => ({ id: "id2" })),
       updateOne: jest.fn(),
       replaceOne: jest.fn(),
       bulkWrite: jest.fn(),
       deleteOne: jest.fn(),
     } as unknown as Collection<Document>;
 
+    mockDb = {
+      collection: jest.fn(() => mockCollection),
+    } as unknown as ReturnType<MongoClient["db"]>;
+
     mockClient = {
       db: jest.fn(() => mockDb) as MongoClient["db"],
     } as unknown as MongoClient;
-
-    (mockDb.collection as jest.Mock) = jest.fn(() => mockCollection);
-    (mockCollection.findOne as jest.Mock) = jest.fn();
   });
 
   it("should create an instance of Mongo", async () => {
@@ -64,15 +63,39 @@ describe("Mongo", () => {
 
   it("should get a value using the get method", async () => {
     // connect to the mockClient
-    const db = new Mongo(mockClient, "testDb", {});
-    // get an entry
-    await db.get("exampleRef.id1");
+    const db = new Mongo(mockClient, "testDb", {
+      "exampleRef": {
+        "id1": { id: "id1" }
+      }
+    });
+
+    // get an entry from cache
+    const value1 = await db.get("exampleRef.id1");
+
+    // expect to have attempt a query
+    expect(value1).toStrictEqual({ id: "id1" });
+
+    // get an entry from db
+    await db.get("exampleRef.id2");
 
     // expect to have attempt a query
     expect(mockCollection.findOne).toHaveBeenCalledWith(
-      { id: "id1" },
+      { id: "id2" },
       { sort: { _block_ts: -1 } }
     );
+  });
+
+  it("should throw an error if value doesnt exist", async () => {
+    // Create mock instance that returns null to signify the value is missing
+    mockCollection = {
+      findOne: jest.fn(() => null),
+    } as unknown as Collection<Document>;
+
+    // connect to the mockClient
+    const db = new Mongo(mockClient, "testDb", {});
+
+    // expect error to be thrown
+    expect(async () => await db.get("exampleRef.id1")).rejects.toThrowError(NotFound);
   });
 
   it("should put a value using the put method", async () => {

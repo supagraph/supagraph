@@ -1,9 +1,7 @@
 // store.test.ts
-import { Store, Entity, getEngine } from "../../src/sync/store";
-
-// we'll use these implementations and spy on calls
-import { DB } from "../../src/sync/db";
-import { Stage } from "../../src/sync/stage";
+import { DB } from "@/sync/tooling/persistence/db";
+import { Stage } from "@/sync/tooling/persistence/stage";
+import { Store, Entity, getEngine } from "@/sync/tooling/persistence/store";
 
 describe("Store", () => {
   let db: DB;

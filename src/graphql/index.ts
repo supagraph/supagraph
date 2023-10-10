@@ -350,7 +350,7 @@ export const createSupagraph = <
   });
 
   // add the provided headers to a response
-  const addHeaders = (hres: Response) => {
+  const addHeaders = (hres: Awaited<ReturnType<typeof handler>>) => {
     // add to return response
     if (headers && hres && hres.headers) {
       Object.keys(headers).forEach((key) => {

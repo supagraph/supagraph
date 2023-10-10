@@ -1,4 +1,4 @@
-import { TypedMap } from "../../src/sync/typedMap";
+import { TypedMap } from "@/sync/tooling/persistence/typedMap";
 
 describe("TypedMap", () => {
   it("should set and get values correctly", () => {

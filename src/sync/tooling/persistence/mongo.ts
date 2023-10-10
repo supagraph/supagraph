@@ -2,25 +2,20 @@
 import type { AnyBulkWriteOperation, Document, MongoClient } from "mongodb";
 
 // Extend from db (abstract-leveldown compatible kv implementation)
-import { DB } from "./db";
-import { BatchOp, Engine } from "./types";
-
-// This should probably just be string - Record<string, string | number | Buffer> (or anything else which is valid in a mongo setting)
-type KV = Record<string, Record<string, Record<string, unknown> | null>>;
-
-// Error to throw with a .notFound prop set to true
-export class NotFound extends Error {
-  notFound: boolean;
-
-  constructor(msg: string) {
-    super(msg);
-    // mark as notFound
-    this.notFound = true;
-  }
-}
+import { BatchOp, Engine, KV } from "@/sync/types";
+import { DB, NotFound } from "@/sync/tooling/persistence/db";
 
 // Simple key-value database store (abstract-leveldown compliant)
 export class Mongo extends DB {
+  // kv store holds a materialised view of current state in local cache (by ref.id)
+  declare kv: KV;
+
+  // engine carries global state
+  declare engine: Engine;
+
+  // useStorage will be undefined on this adapter because we're bypassing DB.update()
+  declare useStorage?: boolean;
+
   // underlying mongo client
   client: MongoClient | Promise<MongoClient>;
 
@@ -90,9 +85,9 @@ export class Mongo extends DB {
     const [ref, id] = key.split(".");
 
     // TODO: the hotpath here is usually checking on things which don't exist in the db
-    //  - we've solved for this in one implementation by loading everything in to memory and setting engine.warmDb [to prevent db reads], but this has a mem limit...
-    //  - we could have a system here to record only the index and store that in mem (btree + bloomfilters), but even that could reach mem limits...
-    //  - when we start nearing limits we could move the btree to disk and continue there (depending on depth this could require several reads to seek by key)
+    //  - we've solved for this in one implementation by loading everything in to memory and setting engine.warmDb [to prevent db reads], but this has a mem limit (however heap is manageble atm)...
+    //  - we could have a system to record only the index and store that in mem (btree + bloomfilters), but we will still risk reaching limits...
+    //  - when we start nearing our limit we could move the btree to disk and continue there (depending on depth this could require several reads to seek by key)
     //  - alternatively we can perist everything to disk by key and we can refrain from doing any seeks by range etc - this will require local storage space the same size as the db medium
     //  - or we give up on using a db persistance layer and store everything locally - this would mean stateful deployments/a connected persistence medium - i/o could still be a constraint.
 
@@ -113,9 +108,12 @@ export class Mongo extends DB {
       (!this.engine.warmDb || ref === "__meta__")
     ) {
       // this wants to get only the most recent insertion
-      return (await Promise.resolve(this.db))
+      const result = await (await Promise.resolve(this.db))
         .collection(ref)
         .findOne({ id }, { sort: { _block_ts: -1 } });
+
+      // return if we discovered a result
+      if (result) return result;
     }
 
     // for valid entry reqs (used in migrations)...
@@ -125,9 +123,12 @@ export class Mongo extends DB {
       !this.engine.newDb &&
       (!this.engine.warmDb || ref === "__meta__")
     ) {
-      // update the materialised view for immutable collection...
+      // return a materialised view for immutable collection - this will get a snapshot of the most recent state for each id...
       if (!this.mutable && ref !== "__meta__") {
-        return (await Promise.resolve(this.db))
+        // find all by aggregating a snapshot
+        const result = await (
+          await Promise.resolve(this.db)
+        )
           .collection(ref)
           .aggregate([
             {
@@ -148,27 +149,29 @@ export class Mongo extends DB {
             },
           ])
           .toArray();
-      }
-
-      // this wants to get only the most recent insertions
-      return (
-        (await Promise.resolve(this.db))
+        // return if the collections holds values
+        if (result && result.length) return result;
+      } else {
+        // fing all on the ref table
+        const result = await (
+          await Promise.resolve(this.db)
+        )
           // if we're immutable then get from the materialised view
           .collection(ref)
           .find({})
-          .toArray()
-      );
-    }
-
-    // can get all from kv store
-    if (ref && !id) {
-      // console.log(`getting ${ref}`);
+          .toArray();
+        // return if the collection holds values
+        if (result && result.length) return result;
+      }
+    } else if (ref && !id) {
+      // can get all from kv store
       const val = this.kv[ref];
 
       // return the collection
       if (val) return Object.values(val);
     }
 
+    // throw not found to indicate we can't find it
     throw new NotFound("Not Found");
   }
 
