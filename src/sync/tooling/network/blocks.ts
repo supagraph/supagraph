@@ -10,7 +10,7 @@ import { processPromiseQueue } from "@/sync/tooling/promises";
 export const getBlockByNumber = async (
   provider: JsonRpcProvider | WebSocketProvider,
   blockNumber: number | "latest"
-): Promise<BlockWithTransactions & any> => {
+): Promise<BlockWithTransactions> => {
   try {
     // fetch block by hex number passing true to fetch all transaction responses
     const block = await provider.send("eth_getBlockByNumber", [

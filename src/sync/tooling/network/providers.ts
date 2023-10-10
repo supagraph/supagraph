@@ -49,36 +49,47 @@ export const getProvider = async (chainId: number) => {
   return engine.providers?.[chainId]?.[0] || false;
 };
 
+// map provider from the syncOp
+export const mapProviders = async (syncOp: Sync) => {
+  // if the network is resolved for the provider...
+  if (syncOp.provider?.network?.chainId) {
+    // record the provider for the chain
+    return syncOp.provider;
+  }
+  // get the network from the provider
+  await syncOp.provider.getNetwork();
+  // record the provider for the chain
+  return syncOp.provider;
+};
+
+// reduce the providers
+export const reduceProviders = (
+  all: Record<number, JsonRpcProvider | WebSocketProvider>,
+  provider: JsonRpcProvider | WebSocketProvider
+) => {
+  // place the provider into an index
+  all[provider.network.chainId] = provider;
+  return all;
+};
+
 // get all networks chainIds
 export const getNetworks = async (useSyncs?: Sync[]) => {
-  // chainIds visited in the process
-  const chainIds: Set<number> = new Set<number>();
-  const syncProviders: Record<number, JsonRpcProvider | WebSocketProvider> = {};
-
   // retrieve the engine backing the Store
   const engine = await getEngine();
 
   // get all network descriptions now...
-  await Promise.all(
-    (useSyncs || engine.syncs).map(async (syncOp) => {
-      if (syncOp.provider?.network?.chainId) {
-        // record the chainId
-        chainIds.add(syncOp.provider.network.chainId);
-        // record the provider for the chain
-        syncProviders[syncOp.provider.network.chainId] = syncOp.provider;
-      } else {
-        // get the network from the provider
-        const { chainId } = await syncOp.provider.getNetwork();
-        // record the chainId
-        chainIds.add(chainId);
-        // record the provider for the chain
-        syncProviders[chainId] = syncOp.provider;
-      }
-    })
+  const syncProviders = (
+    await Promise.all((useSyncs || engine.syncs).map(mapProviders))
+  ).reduce(
+    reduceProviders,
+    {} as Record<number, JsonRpcProvider | WebSocketProvider>
   );
 
+  // return both chainIds and syncProviders
   return {
-    chainIds,
+    // return all providers
     syncProviders,
+    // index the chains defined
+    chainIds: new Set<number>([...Object.keys(syncProviders).map((v) => +v)]),
   };
 };

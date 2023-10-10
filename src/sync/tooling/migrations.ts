@@ -16,6 +16,7 @@ import {
   SyncStage,
   SyncEvent,
 } from "@/sync/types";
+import { Block } from "@ethersproject/abstract-provider";
 
 // apply any migrations that fit in the event range
 export const applyMigrations = async (
@@ -59,10 +60,10 @@ export const applyMigrations = async (
           }
           // place current block as chainIds latestBlock
           if (engine.providers[migration.chainId][0]) {
-            engine.latestBlocks[migration.chainId] = await getBlockByNumber(
+            engine.latestBlocks[migration.chainId] = (await getBlockByNumber(
               engine.providers[migration.chainId][0],
               "latest"
-            );
+            )) as unknown as Block; // engine will work with either definition
           }
         }
         // use the latest detected block

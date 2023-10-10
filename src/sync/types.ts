@@ -76,6 +76,7 @@ export type Engine = {
     cleanup?: boolean;
     silent?: boolean;
   };
+  currentProcess?: Promise<void>;
   close?: (() => Promise<void>) | undefined;
   appendEvents?: (events: SyncEvent[], silent?: boolean) => Promise<void>;
 };
