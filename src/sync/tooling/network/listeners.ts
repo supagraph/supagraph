@@ -117,7 +117,7 @@ export const attemptNextBlock = async (
     }
   }
   // take the next block in the queue (this might not be the same block as the old blockQueue[0] but chainId will be the same)
-  const [{ number, asyncParts, asyncEntities }] = blockQueue.splice(0, 1);
+  const { number, asyncParts, asyncEntities } = blockQueue.shift();
 
   // attempt to process the events in this block (record currentProcess so we can wait for it to complete before closing)...
   engine.currentProcess = processListenerBlockSafely(
@@ -128,8 +128,12 @@ export const attemptNextBlock = async (
     indexedMigrations,
     blockQueue
   );
+
   // await the currentProcess
   await engine.currentProcess;
+
+  // clear the currentProcess
+  engine.currentProcess = Promise.resolve();
 };
 
 // attach listeners (listening for blocks) to enqueue prior to processing
@@ -504,8 +508,8 @@ const stackListenerBlock = (
   }[],
   position: number
 ) => {
-  // splice on to the blockQueue at the provided position
-  blockQueue.splice(position, 0, {
+  // construct a new block to splice into the queue
+  const block = {
     number,
     chainId,
     // recreate the async parts to pull everything fresh
@@ -515,7 +519,18 @@ const stackListenerBlock = (
     }),
     // this shouldn't fail (but it could be empty)
     asyncEntities,
-  });
+  };
+  // position the new block into the blockQueue
+  if (position === 0) {
+    // start position
+    blockQueue.unshift(block);
+  } else if (position === blockQueue.length) {
+    // last position
+    blockQueue.push(block);
+  } else {
+    // splice at any other pos
+    blockQueue.splice(position, 0, block);
+  }
 };
 
 // begine processing the block

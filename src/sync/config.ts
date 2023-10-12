@@ -257,7 +257,7 @@ export const delSync = async (
         engine.events[i].type === params.eventName &&
         engine.events[i].chainId === params.chainId
       ) {
-        engine.events.splice(i, 1);
+        engine.events.pop();
       }
     }
   }
@@ -282,7 +282,7 @@ export const setSyncs = async (
   engine.providers = {};
 
   // should we clear the against on a setSyncs?
-  collection.splice(0, collection.length);
+  collection.length = 0;
 
   // Register each of the syncs from the mapping
   await Promise.all(

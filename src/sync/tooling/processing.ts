@@ -37,6 +37,213 @@ import { getNetworks, getProvider } from "@/sync/tooling/network/providers";
 // Import promise queue handling to process internal promise queues
 import { processPromiseQueue } from "@/sync/tooling/promises";
 
+// process an events callback
+export const processCallback = async (
+  event: SyncEvent,
+  parts: {
+    cancelled?: boolean;
+    block: BlockWithTransactions & any;
+    receipts: Record<string, TransactionReceipt>;
+  },
+  processed: SyncEvent[]
+) => {
+  // access globally shared engine
+  const engine = await getEngine();
+
+  // ensure we havent cancelled the operation...
+  if (!parts.cancelled) {
+    // get an interface to parse the args
+    const iface =
+      engine.eventIfaces[
+        `${
+          (event.data.address &&
+            `${event.chainId.toString()}-${getAddress(event.data.address)}`) ||
+          event.chainId
+        }-${event.type}`
+      ];
+    // make sure we've correctly discovered an iface
+    if (iface) {
+      // extract the args
+      const { args } =
+        typeof event.args === "object"
+          ? event
+          : iface.parseLog({
+              topics: event.data.topics,
+              data: event.data.data,
+            });
+      // transactions can be skipped if we don't need the details in our sync handlers
+      const tx =
+        event.tx ||
+        (!engine.flags.collectTxReceipts && !event.collectTxReceipt
+          ? ({
+              contractAddress: event.data.address,
+              transactionHash: event.data.transactionHash,
+              transactionIndex: event.data.transactionIndex,
+              blockHash: event.data.blockHash,
+              blockNumber: event.data.blockNumber,
+            } as unknown as TransactionReceipt)
+          : await readJSON<TransactionReceipt>(
+              "transactions",
+              `${event.chainId}-${event.data.transactionHash}`
+            ));
+
+      // block can also be summised from event if were not collecting blocks for this run
+      const block =
+        (parts.block &&
+          +event.blockNumber === +parts.block.number &&
+          parts.block) ||
+        (!engine.flags.collectBlocks && !event.collectBlock
+          ? ({
+              hash: event.data.blockHash,
+              number: event.data.blockNumber,
+              timestamp: event.timestamp || event.data.blockNumber,
+            } as unknown as Block)
+          : await readJSON<Block>(
+              "blocks",
+              `${event.chainId}-${+event.data.blockNumber}`
+            ));
+
+      // set the chainId into the engine - this prepares the Store so that any new entities are constructed against these details
+      Store.setChainId(event.chainId);
+      // set the block for each operation into the runtime engine before we run the handler
+      Store.setBlock(
+        block && block.timestamp
+          ? block
+          : ({
+              timestamp: event.timestamp || event.data.blockNumber,
+              number: event.data.blockNumber,
+            } as Block)
+      );
+
+      // index for the callback and opSync entry
+      const cbIndex = `${
+        (event.data.address &&
+          `${event.chainId}-${getAddress(event.data.address)}`) ||
+        event.chainId
+      }-${event.type}`;
+
+      // skip the block if the sync has ended
+      if (
+        !(
+          engine.opSyncs[cbIndex].endBlock !== "latest" &&
+          (engine.opSyncs[cbIndex].endBlock === -1 ||
+            +engine.opSyncs[cbIndex].endBlock <= block.number)
+        )
+      ) {
+        // await the response of the handler before moving on to the next operation in the sorted ops
+        await engine.callbacks[cbIndex]?.(
+          // pass the parsed args construct
+          args,
+          // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
+          {
+            tx: tx as TransactionReceipt & TransactionResponse,
+            block,
+            logIndex: event.data.logIndex,
+          }
+        );
+        // processed given event
+        processed.push(event);
+      }
+    } else if (event.type === "migration") {
+      // get block from tmp storage
+      const block =
+        (parts.block &&
+          +event.blockNumber === +parts.block.number &&
+          parts.block) ||
+        (await readJSON<Block>(
+          "blocks",
+          `${event.chainId}-${+event.blockNumber}`
+        ));
+      // set the chainId into the engine
+      Store.setChainId(event.chainId);
+      // set the block for each operation into the runtime engine before we run the handler
+      Store.setBlock(block);
+      // await the response of the handler before moving to the next operation in the sorted ops
+      await (event.onEvent && typeof event.onEvent === "function"
+        ? event.onEvent
+        : (engine.callbacks[
+            `${event.chainId}-${event.type}-${event.blockNumber}-${
+              (event.data as unknown as { entityName?: string })?.entityName ||
+              "false"
+            }-${(event as unknown as { migrationKey: number }).migrationKey}`
+          ] as unknown as Migration["handler"]))?.(
+        block.number,
+        event.chainId,
+        (event.data as unknown as { entity?: Entity<{ id: string }> })?.entity
+      );
+      // processed given event
+      processed.push(event);
+    } else if (event.type === "onBlock") {
+      // get block from tmp storage
+      const block =
+        (parts.block &&
+          +event.blockNumber === +parts.block.number &&
+          parts.block) ||
+        (await readJSON<Block>(
+          "blocks",
+          `${event.chainId}-${+event.blockNumber}`
+        ));
+      // set the chainId into the engine
+      Store.setChainId(event.chainId);
+      // set the block for each operation into the runtime engine before we run the handler
+      Store.setBlock(block);
+      // await the response of the handler before moving to the next operation in the sorted ops
+      await engine.callbacks[`${event.chainId}-${event.type}`]?.(
+        // pass the parsed args construct
+        [],
+        // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
+        {
+          tx: {} as unknown as TransactionReceipt & TransactionResponse,
+          block,
+          logIndex: -1,
+        }
+      );
+      // processed given event
+      processed.push(event);
+    } else if (event.type === "onTransaction") {
+      // get tx from tmp storage
+      const tx =
+        event.tx ||
+        (await readJSON<TransactionResponse>(
+          "transactions",
+          `${event.chainId}-${event.data}`
+        ));
+      // get the tx and block from tmp storage
+      const block =
+        (parts.block &&
+          +event.blockNumber === +parts.block.number &&
+          parts.block) ||
+        (await readJSON<Block>(
+          "blocks",
+          `${event.chainId}-${+event.blockNumber}`
+        ));
+      // set the chainId into the engine
+      Store.setChainId(event.chainId);
+      // set the block for each operation into the runtime engine before we run the handler
+      Store.setBlock(block);
+      // await the response of the handler before moving to the next operation in the sorted ops
+      await engine.callbacks[
+        `${
+          (event.data.address &&
+            `${event.chainId}-${getAddress(event.data.address)}`) ||
+          event.chainId
+        }-${event.type}`
+      ]?.(
+        // pass the parsed args construct
+        [],
+        // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
+        {
+          tx: tx as TransactionReceipt & TransactionResponse,
+          block,
+          logIndex: -1,
+        }
+      );
+      // processed given event
+      processed.push(event);
+    }
+  }
+};
+
 // Process the sorted events via the sync handler callbacks
 export const processEvents = async (
   chainIds: Set<number>,
@@ -70,7 +277,7 @@ export const processEvents = async (
     // iterate the sorted events and process the callbacks with the given args (sequentially - event loop to process all callbacks)
     while (engine.events.length) {
       // take the first item from the sorted array
-      const opSorted = engine.events.splice(0, 1)[0];
+      const opSorted = engine.events.shift();
 
       // create a checkpoint
       engine?.stage?.checkpoint();
@@ -124,7 +331,7 @@ export const processEvents = async (
     if (!silent) process.stdout.write(`(${processed.length}) `);
 
     // clear the promiseQueue for next iteration
-    engine.promiseQueue.splice(0, engine.promiseQueue.length);
+    engine.promiseQueue.length = 0;
 
     // mark after we end
     if (!silent) process.stdout.write("✔\nEntities stored ");
@@ -217,11 +424,11 @@ export const processListenerBlock = async (
 
   // log that we're syncing the block
   if (!silent)
-    console.log(
-      `\n--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})`
+    process.stdout.write(
+      `--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})\n`
     );
 
-  // log that we're starting
+  // log that we're starting (*note that writing to stdout directly will bypass chromes inspector logs)
   if (!silent) process.stdout.write(`\nEvents processed `);
 
   // await obj containing parts (keeping this then unpacking to check .cancelled by ref in async flow)
@@ -483,7 +690,7 @@ export const processListenerBlock = async (
       // for each of the sync events call the callbacks sequentially (event loop to process all callbacks)
       while (engine.events.length > 0) {
         // take the first item from the sorted array
-        const event = engine.events.splice(0, 1)[0];
+        const event = engine.events.shift();
 
         // create a checkpoint
         engine?.stage?.checkpoint();
@@ -500,13 +707,10 @@ export const processListenerBlock = async (
           // log any errors from handlers - this should probably halt execution
           console.log(e);
           // should splice only new messages added in this callback from the message queue
-          engine.promiseQueue.splice(
-            promiseQueueBeforeEachProcess,
-            engine.promiseQueue.length
-          );
+          engine.promiseQueue.length = promiseQueueBeforeEachProcess;
           // clear anything added here...
           engine.stage.revert();
-          // throw the error again
+          // throw the error again (end exec - skip commit)
           throw e;
         }
 
@@ -520,12 +724,7 @@ export const processListenerBlock = async (
         await engine?.stage?.commit();
       } else {
         // should splice only new messages added in this callback from the message queue
-        engine.promiseQueue.splice(
-          promiseQueueBefore,
-          engine.promiseQueue.length
-        );
-        // revert this checkpoint we're not saving it
-        engine?.stage?.revert();
+        engine.promiseQueue.length = promiseQueueBefore;
       }
 
       // print number of events in stdout
@@ -558,7 +757,7 @@ export const processListenerBlock = async (
             }
           }
           // clear the promiseQueue for next iteration
-          engine.promiseQueue.splice(0, engine.promiseQueue.length);
+          engine.promiseQueue.length = 0;
 
           // mark after we end the processing
           if (!silent) {
@@ -606,213 +805,6 @@ export const processListenerBlock = async (
         // finished after updating pointers
         if (!silent) process.stdout.write(`✔\n`);
       }
-    }
-  }
-};
-
-// process an events callback
-export const processCallback = async (
-  event: SyncEvent,
-  parts: {
-    cancelled?: boolean;
-    block: BlockWithTransactions & any;
-    receipts: Record<string, TransactionReceipt>;
-  },
-  processed: SyncEvent[]
-) => {
-  // access globally shared engine
-  const engine = await getEngine();
-
-  // ensure we havent cancelled the operation...
-  if (!parts.cancelled) {
-    // get an interface to parse the args
-    const iface =
-      engine.eventIfaces[
-        `${
-          (event.data.address &&
-            `${event.chainId.toString()}-${getAddress(event.data.address)}`) ||
-          event.chainId
-        }-${event.type}`
-      ];
-    // make sure we've correctly discovered an iface
-    if (iface) {
-      // extract the args
-      const { args } =
-        typeof event.args === "object"
-          ? event
-          : iface.parseLog({
-              topics: event.data.topics,
-              data: event.data.data,
-            });
-      // transactions can be skipped if we don't need the details in our sync handlers
-      const tx =
-        event.tx ||
-        (!engine.flags.collectTxReceipts && !event.collectTxReceipt
-          ? ({
-              contractAddress: event.data.address,
-              transactionHash: event.data.transactionHash,
-              transactionIndex: event.data.transactionIndex,
-              blockHash: event.data.blockHash,
-              blockNumber: event.data.blockNumber,
-            } as unknown as TransactionReceipt)
-          : await readJSON<TransactionReceipt>(
-              "transactions",
-              `${event.chainId}-${event.data.transactionHash}`
-            ));
-
-      // block can also be summised from event if were not collecting blocks for this run
-      const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
-        (!engine.flags.collectBlocks && !event.collectBlock
-          ? ({
-              hash: event.data.blockHash,
-              number: event.data.blockNumber,
-              timestamp: event.timestamp || event.data.blockNumber,
-            } as unknown as Block)
-          : await readJSON<Block>(
-              "blocks",
-              `${event.chainId}-${+event.data.blockNumber}`
-            ));
-
-      // set the chainId into the engine - this prepares the Store so that any new entities are constructed against these details
-      Store.setChainId(event.chainId);
-      // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(
-        block && block.timestamp
-          ? block
-          : ({
-              timestamp: event.timestamp || event.data.blockNumber,
-              number: event.data.blockNumber,
-            } as Block)
-      );
-
-      // index for the callback and opSync entry
-      const cbIndex = `${
-        (event.data.address &&
-          `${event.chainId}-${getAddress(event.data.address)}`) ||
-        event.chainId
-      }-${event.type}`;
-
-      // skip the block if the sync has ended
-      if (
-        !(
-          engine.opSyncs[cbIndex].endBlock !== "latest" &&
-          (engine.opSyncs[cbIndex].endBlock === -1 ||
-            +engine.opSyncs[cbIndex].endBlock <= block.number)
-        )
-      ) {
-        // await the response of the handler before moving on to the next operation in the sorted ops
-        await engine.callbacks[cbIndex]?.(
-          // pass the parsed args construct
-          args,
-          // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
-          {
-            tx: tx as TransactionReceipt & TransactionResponse,
-            block,
-            logIndex: event.data.logIndex,
-          }
-        );
-        // processed given event
-        processed.push(event);
-      }
-    } else if (event.type === "migration") {
-      // get block from tmp storage
-      const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
-        (await readJSON<Block>(
-          "blocks",
-          `${event.chainId}-${+event.blockNumber}`
-        ));
-      // set the chainId into the engine
-      Store.setChainId(event.chainId);
-      // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(block);
-      // await the response of the handler before moving to the next operation in the sorted ops
-      await (event.onEvent && typeof event.onEvent === "function"
-        ? event.onEvent
-        : (engine.callbacks[
-            `${event.chainId}-${event.type}-${event.blockNumber}-${
-              (event.data as unknown as { entityName?: string })?.entityName ||
-              "false"
-            }-${(event as unknown as { migrationKey: number }).migrationKey}`
-          ] as unknown as Migration["handler"]))?.(
-        block.number,
-        event.chainId,
-        (event.data as unknown as { entity?: Entity<{ id: string }> })?.entity
-      );
-      // processed given event
-      processed.push(event);
-    } else if (event.type === "onBlock") {
-      // get block from tmp storage
-      const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
-        (await readJSON<Block>(
-          "blocks",
-          `${event.chainId}-${+event.blockNumber}`
-        ));
-      // set the chainId into the engine
-      Store.setChainId(event.chainId);
-      // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(block);
-      // await the response of the handler before moving to the next operation in the sorted ops
-      await engine.callbacks[`${event.chainId}-${event.type}`]?.(
-        // pass the parsed args construct
-        [],
-        // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
-        {
-          tx: {} as unknown as TransactionReceipt & TransactionResponse,
-          block,
-          logIndex: -1,
-        }
-      );
-      // processed given event
-      processed.push(event);
-    } else if (event.type === "onTransaction") {
-      // get tx from tmp storage
-      const tx =
-        event.tx ||
-        (await readJSON<TransactionResponse>(
-          "transactions",
-          `${event.chainId}-${event.data}`
-        ));
-      // get the tx and block from tmp storage
-      const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
-        (await readJSON<Block>(
-          "blocks",
-          `${event.chainId}-${+event.blockNumber}`
-        ));
-      // set the chainId into the engine
-      Store.setChainId(event.chainId);
-      // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(block);
-      // await the response of the handler before moving to the next operation in the sorted ops
-      await engine.callbacks[
-        `${
-          (event.data.address &&
-            `${event.chainId}-${getAddress(event.data.address)}`) ||
-          event.chainId
-        }-${event.type}`
-      ]?.(
-        // pass the parsed args construct
-        [],
-        // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
-        {
-          tx: tx as TransactionReceipt & TransactionResponse,
-          block,
-          logIndex: -1,
-        }
-      );
-      // processed given event
-      processed.push(event);
     }
   }
 };
