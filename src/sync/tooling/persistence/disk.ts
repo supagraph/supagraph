@@ -15,12 +15,22 @@ import { SyncEvent, SyncStage } from "@/sync/types";
 export const cwd =
   process.env.NODE_ENV === "development"
     ? `${process.cwd()}/data/`
-    : "/tmp/data-"; // we should use /tmp/ on prod for an ephemeral store during the execution of this process (max 512mb of space)
+    : "/tmp/data-"; // we should use /tmp/ on prod for an ephemeral store during the execution of this process (max 512mb of space on vercel)
 
 // check a file exists
-export const exists = (type: string, filename: string) => {
-  const fileExists = fs.existsSync(`${cwd}${type}-${filename}`);
-  return fileExists || false;
+export const exists = async (
+  type: string,
+  filename: string
+): Promise<boolean> => {
+  try {
+    await fs.promises.access(`${cwd}${type}-${filename}`, fs.constants.F_OK);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return false; // file does not exist
+    }
+    throw new Error(`Error checking if the file exists: ${error.message}`);
+  }
 };
 
 // read the file from disk
@@ -28,20 +38,21 @@ export const readJSON = async <T extends Record<string, any>>(
   type: string,
   filename: string
 ): Promise<T> => {
-  return new Promise((resolve, reject) => {
-    fs.readFile(`${cwd}${type}-${filename}.json`, "utf8", async (err, file) => {
-      if (!err && file && file.length) {
-        try {
-          const data = JSON.parse(file);
-          resolve(data as T);
-        } catch (e) {
-          reject(err);
-        }
-      } else {
-        reject(err);
-      }
+  // wrap in a try to return useful erros
+  try {
+    // read the file async and await its response
+    const file = await fs.promises.readFile(`${cwd}${type}-${filename}.json`, {
+      encoding: "utf8",
     });
-  });
+    // parse the file
+    if (file && file.length) {
+      const data = JSON.parse(file);
+      return data as T;
+    }
+    throw new Error("File is empty or does not exist");
+  } catch (err) {
+    throw new Error(`Error reading JSON file: ${err.message}`);
+  }
 };
 
 // save a JSON data blob to disk
@@ -50,27 +61,24 @@ export const saveJSON = async (
   filename: string,
   resData: Record<string, unknown>
 ): Promise<boolean> => {
-  return new Promise((resolve, reject) => {
-    // create data dir if missing
-    try {
-      fs.accessSync(`${cwd}`);
-    } catch {
-      fs.mkdirSync(`${cwd}`);
+  try {
+    // ensure the directory exists, creating it if necessary
+    await fs.promises.access(cwd, fs.constants.F_OK);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      await fs.promises.mkdir(cwd);
+    } else {
+      throw new Error(`Error accessing directory: ${err.message}`);
     }
-    // write the file
-    fs.writeFile(
-      `${cwd}${type}-${filename}.json`,
-      JSON.stringify(resData),
-      "utf8",
-      async (err) => {
-        if (!err) {
-          resolve(true);
-        } else {
-          reject(err);
-        }
-      }
-    );
-  });
+  }
+
+  // write the file asynchronously
+  await fs.promises.writeFile(
+    `${cwd}${type}-${filename}.json`,
+    JSON.stringify(resData)
+  );
+
+  return true;
 };
 
 // remove the file from disk
@@ -78,15 +86,16 @@ export const deleteJSON = async (
   type: string,
   filename: string
 ): Promise<boolean> => {
-  return new Promise((resolve) => {
-    try {
-      // delete the file
-      fs.rm(`${cwd}${type}-${filename}.json`, async () => resolve(true));
-    } catch {
-      // already deleted
-      resolve(true);
+  try {
+    await fs.promises.rm(`${cwd}${type}-${filename}.json`);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      // the file doesn't exist, consider it already deleted
+      return true;
     }
-  });
+    throw new Error(`Error deleting JSON file: ${error.message}`);
+  }
 };
 
 // read a csv file of events

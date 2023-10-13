@@ -129,10 +129,7 @@ export const txsFromRange = async (
               if (
                 data.transactions &&
                 data.transactions.length &&
-                ((data.transactions[0] as unknown as TransactionResponse)
-                  ?.hash ||
-                  data.transactions[0]) &&
-                // bail out if we're fetching receipts because we're going to have to fetch all of these
+                // bail out and do the full fetch if we want receipts
                 !collectTxReceipts
               ) {
                 // add all tx hashes to the result

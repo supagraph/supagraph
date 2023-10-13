@@ -25,7 +25,8 @@ export const createListener = (
     number: number;
     asyncParts: Promise<() => Promise<AsyncBlockParts>>;
     asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[]
+  }[],
+  asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>
 ) => {
   return async (number: number) => {
     // push to the block stack to signal the block is retrievable
@@ -35,7 +36,8 @@ export const createListener = (
         number,
         +chainId,
         indexedMigrations,
-        blockQueue
+        blockQueue,
+        asyncEntities
       );
     }
   };
@@ -89,7 +91,11 @@ export const attemptNextBlock = async (
       >
     >;
   }[],
-  indexedMigrations: Record<string, Migration[]>
+  indexedMigrations: Record<string, Migration[]>,
+  asyncMigrationEntities: Record<
+    string,
+    Record<number, Promise<{ id: string }[]>>
+  >
 ) => {
   // access the engine
   const engine = await getEngine();
@@ -107,12 +113,13 @@ export const attemptNextBlock = async (
     // ... we need to close it
     while (latestBlockNumber !== blockQueue[0].number) {
       // push all prev blocks in ascending block order
-      recordListenerBlock(
+      await recordListenerBlock(
         // move to the next block each incr
         (latestBlockNumber += 1),
         chainId,
         indexedMigrations,
-        blockQueue
+        blockQueue,
+        asyncMigrationEntities
       );
     }
   }
@@ -157,6 +164,12 @@ export const attachListeners = async (
   // get all chainIds for defined networks
   const { syncProviders } = await getNetworks();
 
+  // store all in sparse array (as obj)
+  const asyncMigrationEntities: Record<
+    string,
+    Record<number, Promise<{ id: string }[]>>
+  > = {};
+
   // array of blocks that need to be processed...
   const blockQueue: {
     chainId: number;
@@ -191,7 +204,8 @@ export const attachListeners = async (
           state,
           +chainId,
           indexedMigrations,
-          blockQueue
+          blockQueue,
+          asyncMigrationEntities
         );
         // construct an error handler to attach to the provider
         const handler = createErrorHandler(errorHandlers);
@@ -232,7 +246,11 @@ export const attachListeners = async (
         // once the state moves to inSync - we can start taking blocks from the array to process
         if (blockQueue.length && state.inSync) {
           // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
-          await attemptNextBlock(blockQueue, indexedMigrations);
+          await attemptNextBlock(
+            blockQueue,
+            indexedMigrations,
+            asyncMigrationEntities
+          );
         } else {
           // wait 1 second for something to enter the queue
           await new Promise((resolve) => {
@@ -337,16 +355,18 @@ export const saveListenerBlockAndReceipts = async (
   // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
   const receipts = (
     await Promise.all(
-      block.transactions.map((tx) =>
-        getReceipt(tx, +chainId, syncProviders[+chainId])
+      block.transactions.map(
+        (tx) => tx && getReceipt(tx, +chainId, syncProviders[+chainId])
       )
     )
   ).reduce((all, receipt) => {
     // combine all receipts to create an indexed lookup obj
-    return {
-      ...all,
-      [receipt.transactionHash]: receipt,
-    };
+    return !receipt?.transactionHash
+      ? all
+      : {
+          ...all,
+          [receipt.transactionHash]: receipt,
+        };
   }, {});
 
   // if we're tmp storing data...
@@ -395,15 +415,14 @@ export const recordListenerBlock = async (
     number: number;
     asyncParts: Promise<() => Promise<AsyncBlockParts>>;
     asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[]
+  }[],
+  asyncMigrationEntities: Record<
+    string,
+    Record<number, Promise<{ id: string }[]>>
+  >
 ) => {
   // access db via the engine
   const engine = await getEngine();
-  // store all in sparse array (as obj)
-  const asyncMigrationEntities: Record<
-    string,
-    Record<number, Promise<{ id: string }[]>>
-  > = {};
 
   // check if any migration is relevant in this block
   if (indexedMigrations[`${chainId}-${number}`]) {
@@ -464,7 +483,7 @@ const cancelOp = async (
 // method to cancel the block after a timeout (default of 30s)
 const cancelListenerBlockAfterTimeout = async (
   blockAndReceipts: Promise<AsyncBlockParts>,
-  timeout: number = 30000,
+  timeout: number = 10000,
   cancelRef: {
     timeout?: NodeJS.Timeout;
     resolve?: () => void;
@@ -599,11 +618,15 @@ export const startProcessingBlock = async (
     try {
       // final await on the block and receipts
       const vals = await blockAndReceipts;
+      // delete all async entities for this blockNum
+      delete asyncEntities[`${chainId}-${+number}`];
+      // delete all async entities for this blockNum
+      delete indexedMigrations[`${chainId}-${+number}`];
       // clear timeout to prevent cancellation
       if (typeof cancelRef.resolver !== "undefined") {
         // clear the timeout to prevent calling the handler
         clearTimeout(cancelRef.timeout);
-        // set the resolver but don't clear the timeout because we want it to resolve its promise
+        // set the resolver but don't clear the timeout yet because we want it to resolve its promise
         cancelRef.resolver = (_, resolve) => {
           // mark for g/c
           delete cancelRef.resolve;
@@ -620,6 +643,10 @@ export const startProcessingBlock = async (
       } else {
         // delete cancelled marker
         delete vals?.cancelled;
+        // delete all receipts
+        Object.keys(vals?.receipts || []).forEach((index) => {
+          delete vals?.receipts?.[index];
+        });
         // delete details from the wrapper
         delete vals?.block;
         delete vals?.receipts;
@@ -632,6 +659,9 @@ export const startProcessingBlock = async (
       }
     }
   }
+
+  // done
+  return true;
 };
 
 // process the events from a block
@@ -673,8 +703,8 @@ export const processListenerBlockSafely = async (
     const blockAndReceipts = (await asyncParts)();
     // wrap in a race here so that we never spend too long stuck on a block
     await Promise.race([
-      // place a promise to cancel the block in 60s (configurable?)
-      cancelListenerBlockAfterTimeout(blockAndReceipts, 30000, cancelRef),
+      // place a promise to cancel the block in 10s (configurable?)
+      cancelListenerBlockAfterTimeout(blockAndReceipts, 10000, cancelRef),
       // attempt to resolve everything that happened in the block...
       startProcessingBlock(
         number,
