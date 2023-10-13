@@ -382,20 +382,31 @@ export class Mongo extends DB {
 
       // save the batch to mongo
       if (!this.engine.readOnly && batch.length) {
-        // eslint-disable-next-line no-await-in-loop
-        await (await Promise.resolve(this.db))
-          .collection(collection)
-          .bulkWrite(batch, {
-            // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
-            ordered: false,
-            // write objectIds mongo side
-            forceServerObjectId: true,
-          });
+        const db = await this.db;
+        // don't stop trying until this returns successfully
+        await bulkWrite(db, collection, batch).catch(async function retry() {
+          return bulkWrite(db, collection, batch).catch(retry);
+        });
       }
     }
 
     return true;
   }
 }
+
+// attempt the bulkWrite operation
+const bulkWrite = async (
+  db: ReturnType<MongoClient["db"]>,
+  collection: string,
+  batch: AnyBulkWriteOperation<Document>[]
+) => {
+  // eslint-disable-next-line no-await-in-loop
+  await db.collection(collection).bulkWrite(batch, {
+    // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
+    ordered: false,
+    // write objectIds mongo side
+    forceServerObjectId: true,
+  });
+};
 
 export default Mongo;
