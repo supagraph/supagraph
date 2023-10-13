@@ -18,27 +18,13 @@ export const createListener = (
     inSync: boolean;
     listening?: boolean;
   },
-  chainId: number,
-  indexedMigrations: Record<string, Migration[]>,
-  blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[],
-  asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>
+  chainId: number
 ) => {
   return async (number: number) => {
     // push to the block stack to signal the block is retrievable
     if (state.listening) {
       // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
-      await recordListenerBlock(
-        number,
-        +chainId,
-        indexedMigrations,
-        blockQueue,
-        asyncEntities
-      );
+      await recordListenerBlock(number, +chainId);
     }
   };
 };
@@ -53,11 +39,10 @@ export const createErrorHandler = (
   return async (error: Error & { code: string }) => {
     // handle the error by code...
     switch (error.code) {
-      case errors.NETWORK_ERROR:
       case errors.SERVER_ERROR:
       case errors.UNSUPPORTED_OPERATION:
         // print the error
-        console.error("Network Error:", error.message);
+        console.error("Server Error:", error.message);
         // reject propagation and trigger close (on all listeners)
         if (errorHandlers?.reject) {
           errorHandlers.reject(error);
@@ -74,73 +59,61 @@ export const createErrorHandler = (
 };
 
 // pull the next block form the queue
-export const attemptNextBlock = async (
-  blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<
-      string,
-      Record<
-        number,
-        Promise<
-          {
-            id: string;
-          }[]
-        >
-      >
-    >;
-  }[],
-  indexedMigrations: Record<string, Migration[]>,
-  asyncMigrationEntities: Record<
-    string,
-    Record<number, Promise<{ id: string }[]>>
-  >
-) => {
+export const attemptNextBlock = async (state: {
+  inSync: boolean;
+  listening?: boolean;
+}) => {
   // access the engine
   const engine = await getEngine();
 
   // extract the chainId we will be operating on
-  const chainId = +blockQueue[0].chainId;
+  const chainId = +engine.blockQueue[0].chainId;
 
   // check that this block follows the last completed block sequentially
   const latestBlock = engine.latestBlocks[chainId];
 
   // if the gap is greater than one then...
-  if (blockQueue[0].number - latestBlock.number > 1) {
+  if (
+    engine.blockQueue[0].number -
+      (latestBlock?.number || engine.blockQueue[0].number) >
+    1
+  ) {
     // start from the latestBlocks blockNumber...
-    let latestBlockNumber = latestBlock.number;
+    let latestBlockNumber = +latestBlock.number;
     // ... we need to close it
-    while (latestBlockNumber !== blockQueue[0].number) {
+    while (latestBlockNumber !== +engine.blockQueue[0].number) {
       // push all prev blocks in ascending block order
       await recordListenerBlock(
         // move to the next block each incr
         (latestBlockNumber += 1),
         chainId,
-        indexedMigrations,
-        blockQueue,
-        asyncMigrationEntities
+        0 + (+latestBlock.number - latestBlockNumber - 1)
       );
     }
   }
   // take the next block in the queue (this might not be the same block as the old blockQueue[0] but chainId will be the same)
-  const { number, asyncParts, asyncEntities } = blockQueue.shift();
+  const { number, asyncParts } = engine.blockQueue.shift();
 
-  // attempt to process the events in this block (record currentProcess so we can wait for it to complete before closing)...
-  engine.currentProcess = processListenerBlockSafely(
-    number,
-    chainId,
-    asyncParts,
-    asyncEntities,
-    indexedMigrations,
-    blockQueue
-  );
+  // double check we spliced something
+  if (number && asyncParts) {
+    // attempt to process the events in this block (record currentProcess so we can wait for it to complete before closing)...
+    engine.currentProcess = processListenerBlockSafely(
+      number,
+      chainId,
+      asyncParts
+    );
 
-  // await the currentProcess
-  await engine.currentProcess;
+    // await the currentProcess
+    await engine.currentProcess;
 
-  // clear the currentProcess
-  engine.currentProcess = Promise.resolve();
+    // clear the currentProcess
+    engine.currentProcess = Promise.resolve();
+  }
+
+  // close listener when queue is clean
+  if (!engine.blockQueue.length) {
+    state.listening = false;
+  }
 };
 
 // attach listeners (listening for blocks) to enqueue prior to processing
@@ -164,22 +137,10 @@ export const attachListeners = async (
   // get all chainIds for defined networks
   const { syncProviders } = await getNetworks();
 
-  // store all in sparse array (as obj)
-  const asyncMigrationEntities: Record<
-    string,
-    Record<number, Promise<{ id: string }[]>>
-  > = {};
-
   // array of blocks that need to be processed...
-  const blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[] = [];
-
+  engine.blockQueue = engine.blockQueue || [];
   // index all migrations
-  const indexedMigrations = migrations.reduce((index, migration) => {
+  engine.indexedMigrations = migrations.reduce((index, migration) => {
     // start arr to keep migrations for chainId at blockNumber
     index[`${migration.chainId}-${migration.blockNumber}`] =
       index[`${migration.chainId}-${migration.blockNumber}`] || [];
@@ -191,6 +152,9 @@ export const attachListeners = async (
     return index;
   }, {} as Record<string, Migration[]>);
 
+  // store all in sparse array (as obj)
+  engine.indexedMigrationEntities = engine.indexedMigrationEntities || {};
+
   // process these ops once now (then again after every block)
   const ops = await getValidSyncOps();
 
@@ -200,13 +164,7 @@ export const attachListeners = async (
       // proceed with valid ops
       if (ops[+chainId].length) {
         // construct a listener to attach to the provider
-        const listener = createListener(
-          state,
-          +chainId,
-          indexedMigrations,
-          blockQueue,
-          asyncMigrationEntities
-        );
+        const listener = createListener(state, +chainId);
         // construct an error handler to attach to the provider
         const handler = createErrorHandler(errorHandlers);
 
@@ -238,39 +196,48 @@ export const attachListeners = async (
     })
   );
 
-  // on the outside, we need to process all events emitted by the handlers to execute procedurally
-  Promise.resolve()
-    .then(async () => {
-      // pull from the reqStack and process...
-      while (state.listening) {
-        // once the state moves to inSync - we can start taking blocks from the array to process
-        if (blockQueue.length && state.inSync) {
-          // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
-          await attemptNextBlock(
-            blockQueue,
-            indexedMigrations,
-            asyncMigrationEntities
-          );
-        } else {
-          // wait 1 second for something to enter the queue
-          await new Promise((resolve) => {
-            setTimeout(resolve, 1000);
-          });
-        }
-      }
-    })
-    .catch((e) => {
-      // reject propagation and close
-      if (errorHandlers?.reject) {
-        errorHandlers.reject(e);
-      }
-    });
-
   // retun a handler to remove the listener
   return [
     // all valid listeners
     ...listeners.filter((v) => v),
   ];
+};
+
+// begin processing blocks
+export const attachBlockProcessing = async (
+  state: {
+    inSync: boolean;
+    listening?: boolean;
+  },
+  errorHandlers: {
+    reject?: (reason?: any) => void;
+    resolve?: (value: void | PromiseLike<void>) => void;
+  } = undefined
+) => {
+  // get the engine
+  const engine = await getEngine();
+
+  // catch any errors
+  try {
+    // pull from the reqStack and process...
+    while (state.listening) {
+      // once the state moves to inSync - we can start taking blocks from the array to process
+      if (engine.blockQueue.length && state.inSync) {
+        // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
+        await attemptNextBlock(state);
+      } else {
+        // wait 1 second for something to enter the queue
+        await new Promise((resolve) => {
+          setTimeout(resolve, 1000);
+        });
+      }
+    }
+  } catch (e) {
+    // reject propagation and close
+    if (errorHandlers?.reject) {
+      errorHandlers.reject(e);
+    }
+  }
 };
 
 // restructure ops into ops by chainId
@@ -382,6 +349,9 @@ export const saveListenerBlockAndReceipts = async (
     block,
     receipts,
   });
+
+  // saved
+  return true;
 };
 
 // read a block and its receipt from disk
@@ -409,55 +379,42 @@ export const readListenerBlockAndReceipts = async (
 export const recordListenerBlock = async (
   number: number,
   chainId: number,
-  indexedMigrations: Record<string, Migration[]>,
-  blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[],
-  asyncMigrationEntities: Record<
-    string,
-    Record<number, Promise<{ id: string }[]>>
-  >
+  position?: number
 ) => {
   // access db via the engine
   const engine = await getEngine();
 
   // check if any migration is relevant in this block
-  if (indexedMigrations[`${chainId}-${number}`]) {
+  if (engine.indexedMigrations[`${chainId}-${number}`]) {
     // start collecting entities for migration now (this could be expensive)
-    indexedMigrations[`${chainId}-${number}`].forEach((migration, key) => {
-      asyncMigrationEntities[`${chainId}-${number}`] =
-        asyncMigrationEntities[`${chainId}-${number}`] || {};
-      asyncMigrationEntities[`${chainId}-${number}`][key] = new Promise(
-        (resolve) => {
-          resolve(
-            migration.entity &&
-              (engine.db.get(migration.entity) as Promise<{ id: string }[]>)
-          );
-        }
-      );
-    });
+    engine.indexedMigrations[`${chainId}-${number}`].forEach(
+      (migration, key) => {
+        engine.indexedMigrationEntities[`${chainId}-${number}`] =
+          engine.indexedMigrationEntities[`${chainId}-${number}`] || {};
+        engine.indexedMigrationEntities[`${chainId}-${number}`][key] =
+          new Promise((resolve) => {
+            resolve(
+              migration.entity &&
+                (engine.db.get(migration.entity) as Promise<{ id: string }[]>)
+            );
+          });
+      }
+    );
   }
 
   // record the new block
   stackListenerBlock(
     number,
     chainId,
-    // record migration entities on the block
-    asyncMigrationEntities,
-    // pass in the full queue to stack against
-    blockQueue,
     // position at the end of the queue
-    blockQueue.length
+    position ?? engine.blockQueue.length
   );
 };
 
 // stop waiting for a read action
 const cancelReadWait = () => {
   return new Promise<AsyncBlockParts>((resolve) => {
-    setTimeout(() => resolve({} as unknown as AsyncBlockParts), 10000);
+    setTimeout(() => resolve({} as unknown as AsyncBlockParts), 3000);
   });
 };
 
@@ -480,17 +437,17 @@ const cancelOp = async (
   resolve();
 };
 
-// method to cancel the block after a timeout (default of 30s)
+// method to cancel the block after a timeout (default of 10s)
 const cancelListenerBlockAfterTimeout = async (
   blockAndReceipts: Promise<AsyncBlockParts>,
   timeout: number = 10000,
   cancelRef: {
     timeout?: NodeJS.Timeout;
-    resolve?: () => void;
+    resolve?: () => void | Promise<void>;
     resolver?: (
       blockAndReceipts: Promise<AsyncBlockParts>,
-      resolve: () => void
-    ) => void;
+      resolve: () => void | Promise<void>
+    ) => Promise<void>;
   } = {}
 ) => {
   // return a promise to resolve the cancelation on the provided vals
@@ -500,55 +457,34 @@ const cancelListenerBlockAfterTimeout = async (
     // attach caller to the ref
     cancelRef.resolve = () => cancelRef.resolver(blockAndReceipts, resolve);
     // add another 60s to process the block
-    cancelRef.timeout = setTimeout(cancelRef.resolve, Math.max(timeout, 10000)); // min of 10s per block, default of 30s - we'll adjust if needed
+    cancelRef.timeout = setTimeout(cancelRef.resolve, Math.max(timeout, 3000)); // min of 3s per block, default of 10s - we'll adjust if needed
   });
 };
 
 // restack this at the top so that we can try again
-const stackListenerBlock = (
+const stackListenerBlock = async (
   number: number,
   chainId: number,
-  asyncEntities: Record<
-    string,
-    Record<
-      number,
-      Promise<
-        {
-          id: string;
-        }[]
-      >
-    >
-  >,
-  blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[],
   position: number
 ) => {
+  const engine = await getEngine();
   // construct a new block to splice into the queue
   const block = {
     number,
     chainId,
     // recreate the async parts to pull everything fresh
-    asyncParts: saveListenerBlockAndReceipts(number, chainId).then(() => {
-      // return method to read the data back into memory
-      return () => readListenerBlockAndReceipts(number, chainId);
-    }),
-    // this shouldn't fail (but it could be empty)
-    asyncEntities,
+    asyncParts: saveListenerBlockAndReceipts(number, chainId),
   };
   // position the new block into the blockQueue
   if (position === 0) {
     // start position
-    blockQueue.unshift(block);
-  } else if (position === blockQueue.length) {
+    engine.blockQueue.unshift(block);
+  } else if (position === engine.blockQueue.length) {
     // last position
-    blockQueue.push(block);
+    engine.blockQueue.push(block);
   } else {
     // splice at any other pos
-    blockQueue.splice(position, 0, block);
+    engine.blockQueue.splice(position, 0, block);
   }
 };
 
@@ -556,22 +492,14 @@ const stackListenerBlock = (
 export const startProcessingBlock = async (
   number: number,
   chainId: number,
-  indexedMigrations: Record<string, Migration[]>,
-  blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[],
-  asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>,
   blockAndReceipts: Promise<AsyncBlockParts>,
   cancelRef: {
     timeout?: NodeJS.Timeout;
-    resolve?: () => void;
+    resolve?: () => void | Promise<void>;
     resolver?: (
       blockAndReceipts: Promise<AsyncBlockParts>,
-      resolve: () => void
-    ) => void;
+      resolve: () => void | Promise<void>
+    ) => Promise<void>;
   }
 ) => {
   // using the engine to access flags
@@ -592,10 +520,10 @@ export const startProcessingBlock = async (
       engine.flags.collectTxReceipts,
       engine.flags.silent,
       // pass through the length of the queue for reporting and for deciding if we should be saving or not
-      blockQueue.length,
+      engine.blockQueue.length,
       // helper parts to pass through entities, block & receipts...
-      indexedMigrations,
-      asyncEntities,
+      engine.indexedMigrations,
+      engine.indexedMigrationEntities,
       blockAndReceipts
     );
   } catch (e) {
@@ -619,27 +547,27 @@ export const startProcessingBlock = async (
       // final await on the block and receipts
       const vals = await blockAndReceipts;
       // delete all async entities for this blockNum
-      delete asyncEntities[`${chainId}-${+number}`];
+      delete engine.indexedMigrations[`${chainId}-${+number}`];
       // delete all async entities for this blockNum
-      delete indexedMigrations[`${chainId}-${+number}`];
+      delete engine.indexedMigrationEntities[`${chainId}-${+number}`];
       // clear timeout to prevent cancellation
       if (typeof cancelRef.resolver !== "undefined") {
         // clear the timeout to prevent calling the handler
         clearTimeout(cancelRef.timeout);
         // set the resolver but don't clear the timeout yet because we want it to resolve its promise
-        cancelRef.resolver = (_, resolve) => {
+        cancelRef.resolver = async (_, resolve) => {
           // mark for g/c
           delete cancelRef.resolve;
           delete cancelRef.resolver;
           delete cancelRef.timeout;
           // resolve the promise to clear ref
-          resolve();
+          await resolve();
         };
       }
       // restack the request if any parts we're missing
       if (!vals || vals?.cancelled || !vals?.block || !vals?.receipts) {
         // reattempt the timedout block
-        stackListenerBlock(number, chainId, asyncEntities, blockQueue, 0);
+        stackListenerBlock(number, chainId, 0);
       } else {
         // delete cancelled marker
         delete vals?.cancelled;
@@ -668,25 +596,7 @@ export const startProcessingBlock = async (
 export const processListenerBlockSafely = async (
   number: number,
   chainId: number,
-  asyncParts: Promise<() => Promise<AsyncBlockParts>>,
-  asyncEntities: Record<
-    string,
-    Record<
-      number,
-      Promise<
-        {
-          id: string;
-        }[]
-      >
-    >
-  >,
-  indexedMigrations: Record<string, Migration[]>,
-  blockQueue: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<() => Promise<AsyncBlockParts>>;
-    asyncEntities: Record<string, Record<number, Promise<{ id: string }[]>>>;
-  }[]
+  asyncParts: Promise<boolean>
 ) => {
   // get the engine
   const engine = await getEngine();
@@ -699,22 +609,23 @@ export const processListenerBlockSafely = async (
   ) {
     // track cancellation timeout for cancelling
     const cancelRef = {};
-    // start reading data from disk - this will pull the async data at chainId with current number
-    const blockAndReceipts = (await asyncParts)();
-    // wrap in a race here so that we never spend too long stuck on a block
-    await Promise.race([
-      // place a promise to cancel the block in 10s (configurable?)
-      cancelListenerBlockAfterTimeout(blockAndReceipts, 10000, cancelRef),
-      // attempt to resolve everything that happened in the block...
-      startProcessingBlock(
-        number,
-        chainId,
-        indexedMigrations,
-        blockQueue,
-        asyncEntities,
-        blockAndReceipts,
-        cancelRef
-      ),
-    ]);
+    // await for the write operation to complete
+    const saved = await asyncParts;
+    // check that we saved it
+    if (saved) {
+      // read the data back into memory (can this fail?)
+      const blockAndReceipts = readListenerBlockAndReceipts(number, chainId);
+
+      // wrap in a race here so that we never spend too long stuck on a block
+      await Promise.race([
+        // place a promise to cancel the block in 10s (configurable?)
+        cancelListenerBlockAfterTimeout(blockAndReceipts, 10000, cancelRef),
+        // attempt to resolve everything that happened in the block...
+        startProcessingBlock(number, chainId, blockAndReceipts, cancelRef),
+      ]);
+    } else {
+      // throw if the file is missing
+      throw new Error("File isnt saved - try again");
+    }
   }
 };

@@ -24,6 +24,7 @@ import {
   getNetworks,
   restoreSyncOps,
   updateSyncsOpsMeta,
+  attachBlockProcessing,
 } from "@/sync/tooling";
 
 // Import sortSyncs method from config
@@ -192,14 +193,15 @@ export const sync = async ({
       listening: true,
     };
 
+    // set up a mutable set of handlers to monitor for halting errors so that we can unlock db before exiting
+    const errorHandler: {
+      resolved?: boolean;
+      reject?: (reason?: any) => void;
+      resolve?: (value: void | PromiseLike<void>) => void;
+    } = {};
+
     // event listener will see all blocks and transactions passing everything to appropriate handlers in block/tx/log order (grouped by type)
     if (listen) {
-      // set up a mutable set of handlers to monitor for halting errors so that we can unlock db before exiting
-      const errorHandler: {
-        resolved?: boolean;
-        reject?: (reason?: any) => void;
-        resolve?: (value: void | PromiseLike<void>) => void;
-      } = {};
       // create promise and apply handlers to obj
       const errorPromise = new Promise<void>((resolve, reject) => {
         errorHandler.reject = reject;
@@ -357,6 +359,25 @@ export const sync = async ({
         if (!silent) console.log("\n===\n\nProcessing listeners...");
         // open the listener queue for resolution
         controls.inSync = true;
+        // we could close and reopen the listeners every x seconds to clear anything which is stuck in garbage
+        attachBlockProcessing(controls, errorHandler).then(
+          async function reattach() {
+            // if we havent throw an error and exited the process...
+            if (!errorHandler.resolved) {
+              // start listening again
+              controls.listening = true;
+              // keep reattaching on close to keep the heap clean
+              return new Promise((resolve) => {
+                setTimeout(() => {
+                  resolve(
+                    attachBlockProcessing(controls, errorHandler).then(reattach)
+                  );
+                });
+              });
+            }
+            return false;
+          }
+        );
       });
     } else {
       // set syncing to false

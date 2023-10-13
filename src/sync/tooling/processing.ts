@@ -585,6 +585,9 @@ export const processListenerBlock = async (
           op.eventName !== "withPromises" &&
           engine.callbacks[
             `${op.chainId}-${getAddress(op.address)}-${op.eventName}`
+          ] &&
+          engine.eventIfaces[
+            `${op.chainId}-${getAddress(op.address)}-${op.eventName}`
           ]
         ) {
           // check for a matching topic in the transactions logBloom

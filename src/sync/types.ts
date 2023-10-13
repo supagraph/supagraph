@@ -66,6 +66,16 @@ export type Engine = {
   opSyncs?: Record<string, Sync>;
   handlers?: Handlers;
   events?: SyncEvent[];
+  blockQueue?: {
+    chainId: number;
+    number: number;
+    asyncParts: Promise<boolean>;
+  }[];
+  indexedMigrations?: Record<string, Migration[]>;
+  indexedMigrationEntities?: Record<
+    string,
+    Record<number, Promise<{ id: string }[]>>
+  >;
   // flags to change runtime behavior
   flags?: {
     start?: keyof typeof SyncStage | false;

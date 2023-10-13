@@ -40,7 +40,7 @@ export const processPromiseQueue = async (
         // wait for the function/promise to resolve
         if (typeof (promise as Promise<unknown>).then === "function") {
           queue[key] = await Promise.resolve(promise);
-        } else {
+        } else if (typeof promise === "function") {
           queue[key] = await (
             promise as (stack: (() => Promise<any>)[]) => Promise<unknown>
           )(reqStack);

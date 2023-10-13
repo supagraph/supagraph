@@ -125,30 +125,72 @@ export class Mongo extends DB {
     ) {
       // return a materialised view for immutable collection - this will get a snapshot of the most recent state for each id...
       if (!this.mutable && ref !== "__meta__") {
-        // find all by aggregating a snapshot
-        const result = await (
-          await Promise.resolve(this.db)
-        )
-          .collection(ref)
-          .aggregate([
-            {
-              $sort: {
-                _block_ts: -1,
+        // get collection for the ref
+        const collection = (await Promise.resolve(this.db)).collection(ref);
+        // get the total number of results we expect to retrieve
+        const totalCountAggregate = collection.aggregate([
+          {
+            $sort: {
+              _block_ts: -1,
+            },
+          },
+          {
+            $group: {
+              _id: "$id",
+              latestDocument: {
+                $first: "$$ROOT",
               },
             },
-            {
-              $group: {
-                _id: "$id",
-                latestDocument: {
-                  $first: "$$ROOT",
+          },
+          {
+            $count: "totalDocuments",
+          },
+        ]);
+        // batch them into 10000 blocks to not overwhelm the driver
+        const batchSize = 5000;
+        const totalCount = await totalCountAggregate.next();
+        const totalCountResult = totalCount ? totalCount.totalDocuments : 0;
+        // move skip along
+        let skip = 0;
+        // collect all results into array
+        const result = [];
+        // while theres still results left...
+        while (skip < totalCountResult) {
+          (
+            await collection
+              .aggregate([
+                {
+                  $sort: {
+                    _block_ts: -1,
+                  },
                 },
-              },
-            },
-            {
-              $replaceRoot: { newRoot: "$latestDocument" },
-            },
-          ])
-          .toArray();
+                {
+                  $group: {
+                    _id: "$id",
+                    latestDocument: {
+                      $first: "$$ROOT",
+                    },
+                  },
+                },
+                {
+                  $replaceRoot: { newRoot: "$latestDocument" },
+                },
+                {
+                  $skip: skip,
+                },
+                {
+                  $limit: batchSize,
+                },
+              ])
+              .toArray()
+          ).forEach((obj) => {
+            // push all to the result
+            result.push(obj);
+          });
+          // Process or store the documents in memory here
+          skip += batchSize;
+        }
+
         // return if the collections holds values
         if (result && result.length) return result;
       } else {
