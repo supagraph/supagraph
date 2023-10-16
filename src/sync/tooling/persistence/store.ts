@@ -149,6 +149,18 @@ export class Entity<T extends { id: string }> extends TypedMap<
     );
   }
 
+  replace(value: T): void {
+    Object.keys(value).forEach((key) => {
+      super.set(
+        key as keyof T,
+        // eslint-disable-next-line no-underscore-dangle
+        (value[key] as { _isBigNumber: boolean })?._isBigNumber
+          ? ((value[key] as BigNumber).toString() as unknown as T[keyof T])
+          : value[key]
+      );
+    });
+  }
+
   get<K extends keyof T>(key: K): T[K] {
     return super.get(key) as T[K];
   }

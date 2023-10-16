@@ -1,16 +1,19 @@
+import { spawn } from "child_process";
+
 import { errors } from "ethers";
 import { JsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
 import { TransactionResponse } from "@ethersproject/abstract-provider";
 
 import { getEngine } from "@/sync/tooling/persistence/store";
 import { processListenerBlock } from "@/sync/tooling/processing";
-import { saveJSON, readJSON } from "@/sync/tooling/persistence/disk";
+import { saveJSON, readJSON, cwd } from "@/sync/tooling/persistence/disk";
 
 import { AsyncBlockParts, Migration, Sync } from "@/sync/types";
 
-import { getBlockByNumber } from "@/sync/tooling/network/blocks";
 import { getNetworks } from "@/sync/tooling/network/providers";
 import { getTransactionReceipt } from "@/sync/tooling/network/transactions";
+
+import { saveListenerBlockAndReceipts as saveListenerBlockAndReceiptsProcess } from "@/sync/tooling/network/process/saveBlock";
 
 // create a listener to attach to the provider
 export const createListener = (
@@ -21,9 +24,9 @@ export const createListener = (
   chainId: number
 ) => {
   return async (number: number) => {
-    // push to the block stack to signal the block is retrievable
+    // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
     if (state.listening) {
-      // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
+      // push to the block stack to signal the block is retrievable
       await recordListenerBlock(number, +chainId);
     }
   };
@@ -39,6 +42,7 @@ export const createErrorHandler = (
   return async (error: Error & { code: string }) => {
     // handle the error by code...
     switch (error.code) {
+      // case errors.NETWORK_ERROR:
       case errors.SERVER_ERROR:
       case errors.UNSUPPORTED_OPERATION:
         // print the error
@@ -48,12 +52,7 @@ export const createErrorHandler = (
           errorHandlers.reject(error);
         }
         break;
-      case errors.TIMEOUT:
-        // timeouts will be handled internally
-        break;
       default:
-        // don't close but print the error...
-        console.error("Unhandled error:", error.message);
     }
   };
 };
@@ -62,6 +61,7 @@ export const createErrorHandler = (
 export const attemptNextBlock = async (state: {
   inSync: boolean;
   listening?: boolean;
+  suspended?: boolean;
 }) => {
   // access the engine
   const engine = await getEngine();
@@ -92,19 +92,24 @@ export const attemptNextBlock = async (state: {
     }
   }
   // take the next block in the queue (this might not be the same block as the old blockQueue[0] but chainId will be the same)
-  const { number, asyncParts } = engine.blockQueue.shift();
+  const block = engine.blockQueue.shift();
 
   // double check we spliced something
-  if (number && asyncParts) {
+  if (block.number && block.asyncParts) {
     // attempt to process the events in this block (record currentProcess so we can wait for it to complete before closing)...
     engine.currentProcess = processListenerBlockSafely(
-      number,
+      block.number,
       chainId,
-      asyncParts
+      block.asyncParts
     );
 
     // await the currentProcess
     await engine.currentProcess;
+
+    // delete these components
+    delete block.number;
+    delete block.chainId;
+    delete block.asyncParts;
 
     // clear the currentProcess
     engine.currentProcess = Promise.resolve();
@@ -112,7 +117,7 @@ export const attemptNextBlock = async (state: {
 
   // close listener when queue is clean
   if (!engine.blockQueue.length) {
-    state.listening = false;
+    state.suspended = true;
   }
 };
 
@@ -208,6 +213,7 @@ export const attachBlockProcessing = async (
   state: {
     inSync: boolean;
     listening?: boolean;
+    suspended?: boolean;
   },
   errorHandlers: {
     reject?: (reason?: any) => void;
@@ -220,7 +226,7 @@ export const attachBlockProcessing = async (
   // catch any errors
   try {
     // pull from the reqStack and process...
-    while (state.listening) {
+    while (state.listening && !state.suspended) {
       // once the state moves to inSync - we can start taking blocks from the array to process
       if (engine.blockQueue.length && state.inSync) {
         // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
@@ -305,6 +311,50 @@ export const getReceipt = async (
   }
 };
 
+// get data using a process to move reqs out of blocking path
+export async function saveListenerBlockAndReceiptsInSpawnedProcess(
+  block: number,
+  chainId: number
+): Promise<boolean> {
+  // retrieve engine
+  const engine = await getEngine();
+  const { syncProviders } = await getNetworks();
+
+  // spawn a child_process to save the block and transaction receipts
+  return new Promise<boolean>((resolve, reject) => {
+    // spawn the child process
+    const child = spawn(
+      "node",
+      [
+        // absolute path to the child process script
+        `${__dirname}/process/saveBlock.js`,
+        // pass args as strings (we will resolve them on the otherside)
+        block.toString(10),
+        chainId.toString(10),
+        syncProviders[+chainId].connection.url,
+        cwd,
+        engine.flags.cleanup.toString(),
+      ],
+      {
+        shell: true, // Use shell to execute the command
+        cwd: process.cwd(), // Pass current cwd as workding dir
+      }
+    );
+
+    // when the handle exits the file is saved
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve(true);
+      } else {
+        reject(new Error(`Child process exited with an error code: ${code}`));
+      }
+    });
+  }).catch(() => {
+    // resolve to false (we didn't save the block & receipts)
+    return false;
+  });
+}
+
 // pull all block and receipt details (cancel attempt after 30s)
 export const saveListenerBlockAndReceipts = async (
   number: number,
@@ -313,45 +363,28 @@ export const saveListenerBlockAndReceipts = async (
   // retrieve engine
   const engine = await getEngine();
 
-  // get all chainIds for defined networks
-  const { syncProviders } = await getNetworks();
+  // if we're multithreading the collection use the spaw to complete the collection...
+  if (!engine.flags.multithread) {
+    // get all chainIds for defined networks
+    const { syncProviders } = await getNetworks();
 
-  // get the full block details
-  const block = await getBlockByNumber(syncProviders[+chainId], number);
-
-  // get all receipts for the block - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-  const receipts = (
-    await Promise.all(
-      block.transactions.map(
-        (tx) => tx && getReceipt(tx, +chainId, syncProviders[+chainId])
-      )
-    )
-  ).reduce((all, receipt) => {
-    // combine all receipts to create an indexed lookup obj
-    return !receipt?.transactionHash
-      ? all
-      : {
-          ...all,
-          [receipt.transactionHash]: receipt,
-        };
-  }, {});
-
-  // if we're tmp storing data...
-  if (!engine.flags.cleanup) {
-    // save the block for sync-cache
-    await saveJSON("blocks", `${chainId}-${+block.number}`, {
-      block,
-    });
+    // if we get any errors here then return false, we'll restack the block when we get to it...
+    try {
+      // save the block and receipt using the saveBlockProcess but without spawning children to do it...
+      return await saveListenerBlockAndReceiptsProcess(
+        number,
+        chainId,
+        syncProviders[+chainId].connection.url,
+        cwd,
+        engine.flags.cleanup
+      );
+    } catch {
+      return false;
+    }
   }
 
-  // save everything together to reduce readback i/o (if we're using cleanup true - this is all we will save - we will delete it after processing)
-  await saveJSON("blockAndReceipts", `${chainId}-${+block.number}`, {
-    block,
-    receipts,
-  });
-
-  // saved
-  return true;
+  // return using the spawn process (create a new process to collect each blocks details)
+  return saveListenerBlockAndReceiptsInSpawnedProcess(number, chainId);
 };
 
 // read a block and its receipt from disk
@@ -373,42 +406,6 @@ export const readListenerBlockAndReceipts = async (
   } catch {
     return false as unknown as AsyncBlockParts;
   }
-};
-
-// record the block for the given chainId
-export const recordListenerBlock = async (
-  number: number,
-  chainId: number,
-  position?: number
-) => {
-  // access db via the engine
-  const engine = await getEngine();
-
-  // check if any migration is relevant in this block
-  if (engine.indexedMigrations[`${chainId}-${number}`]) {
-    // start collecting entities for migration now (this could be expensive)
-    engine.indexedMigrations[`${chainId}-${number}`].forEach(
-      (migration, key) => {
-        engine.indexedMigrationEntities[`${chainId}-${number}`] =
-          engine.indexedMigrationEntities[`${chainId}-${number}`] || {};
-        engine.indexedMigrationEntities[`${chainId}-${number}`][key] =
-          new Promise((resolve) => {
-            resolve(
-              migration.entity &&
-                (engine.db.get(migration.entity) as Promise<{ id: string }[]>)
-            );
-          });
-      }
-    );
-  }
-
-  // record the new block
-  stackListenerBlock(
-    number,
-    chainId,
-    // position at the end of the queue
-    position ?? engine.blockQueue.length
-  );
 };
 
 // stop waiting for a read action
@@ -461,18 +458,55 @@ const cancelListenerBlockAfterTimeout = async (
   });
 };
 
+// record the block for the given chainId
+export const recordListenerBlock = async (
+  number: number,
+  chainId: number,
+  position?: number
+) => {
+  // access db via the engine
+  const engine = await getEngine();
+
+  // check if any migration is relevant in this block
+  if (engine.indexedMigrations[`${chainId}-${number}`]) {
+    // start collecting entities for migration now (this could be expensive)
+    engine.indexedMigrations[`${chainId}-${number}`].forEach(
+      (migration, key) => {
+        engine.indexedMigrationEntities[`${chainId}-${number}`] =
+          engine.indexedMigrationEntities[`${chainId}-${number}`] || {};
+        engine.indexedMigrationEntities[`${chainId}-${number}`][key] =
+          new Promise((resolve) => {
+            resolve(
+              migration.entity &&
+                (engine.db.get(migration.entity) as Promise<{ id: string }[]>)
+            );
+          });
+      }
+    );
+  }
+
+  // record the new block
+  await stackListenerBlock(
+    number,
+    chainId,
+    // position at the end of the queue
+    position ?? engine.blockQueue.length
+  );
+};
+
 // restack this at the top so that we can try again
 const stackListenerBlock = async (
   number: number,
   chainId: number,
   position: number
 ) => {
+  // collect engine to insert onto blockQueue
   const engine = await getEngine();
   // construct a new block to splice into the queue
   const block = {
     number,
     chainId,
-    // recreate the async parts to pull everything fresh
+    // recreate the async parts to pull everything fresh (we can switch betwe)
     asyncParts: saveListenerBlockAndReceipts(number, chainId),
   };
   // position the new block into the blockQueue
@@ -524,6 +558,7 @@ export const startProcessingBlock = async (
       // helper parts to pass through entities, block & receipts...
       engine.indexedMigrations,
       engine.indexedMigrationEntities,
+      // pass through the promise which is reading the block data back from disk
       blockAndReceipts
     );
   } catch (e) {
@@ -567,7 +602,7 @@ export const startProcessingBlock = async (
       // restack the request if any parts we're missing
       if (!vals || vals?.cancelled || !vals?.block || !vals?.receipts) {
         // reattempt the timedout block
-        stackListenerBlock(number, chainId, 0);
+        await stackListenerBlock(number, chainId, 0);
       } else {
         // delete cancelled marker
         delete vals?.cancelled;
@@ -613,7 +648,7 @@ export const processListenerBlockSafely = async (
     const saved = await asyncParts;
     // check that we saved it
     if (saved) {
-      // read the data back into memory (can this fail?)
+      // read the data back into memory (can this fail? - should we just block here until we read it?)
       const blockAndReceipts = readListenerBlockAndReceipts(number, chainId);
 
       // wrap in a race here so that we never spend too long stuck on a block
@@ -624,8 +659,8 @@ export const processListenerBlockSafely = async (
         startProcessingBlock(number, chainId, blockAndReceipts, cancelRef),
       ]);
     } else {
-      // throw if the file is missing
-      throw new Error("File isnt saved - try again");
+      // reattampt the same block
+      await stackListenerBlock(number, chainId, 0);
     }
   }
 };

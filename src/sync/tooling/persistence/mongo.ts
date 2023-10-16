@@ -1,5 +1,12 @@
 // Mongo class wraps mongo with a simple entity management system (abstract-leveldown compatible)
-import type { AnyBulkWriteOperation, Document, MongoClient } from "mongodb";
+import type {
+  AnyBulkWriteOperation,
+  Document,
+  Filter,
+  MongoClient,
+  WithId,
+  WithoutId,
+} from "mongodb";
 
 // Extend from db (abstract-leveldown compatible kv implementation)
 import { BatchOp, Engine, KV } from "@/sync/types";
@@ -123,6 +130,9 @@ export class Mongo extends DB {
       !this.engine.newDb &&
       (!this.engine.warmDb || ref === "__meta__")
     ) {
+      // default the collection
+      this.kv[ref] = this.kv[ref] || {};
+
       // return a materialised view for immutable collection - this will get a snapshot of the most recent state for each id...
       if (!this.mutable && ref !== "__meta__") {
         // get collection for the ref
@@ -146,53 +156,69 @@ export class Mongo extends DB {
             $count: "totalDocuments",
           },
         ]);
+        // move skip along to paginate the result
+        let skip = 0;
         // batch them into 10000 blocks to not overwhelm the driver
-        const batchSize = 5000;
+        const batchSize = 10000;
         const totalCount = await totalCountAggregate.next();
         const totalCountResult = totalCount ? totalCount.totalDocuments : 0;
-        // move skip along
-        let skip = 0;
+        // return a page of results
+        const getPage = async () => {
+          return collection
+            .aggregate([
+              {
+                $sort: {
+                  _block_ts: -1,
+                },
+              },
+              {
+                $group: {
+                  _id: "$id",
+                  latestDocument: {
+                    $first: "$$ROOT",
+                  },
+                },
+              },
+              {
+                $replaceRoot: { newRoot: "$latestDocument" },
+              },
+              {
+                $skip: skip,
+              },
+              {
+                $limit: batchSize,
+              },
+            ])
+            .toArray();
+        };
         // collect all results into array
         const result = [];
         // while theres still results left...
         while (skip < totalCountResult) {
-          (
-            await collection
-              .aggregate([
-                {
-                  $sort: {
-                    _block_ts: -1,
-                  },
-                },
-                {
-                  $group: {
-                    _id: "$id",
-                    latestDocument: {
-                      $first: "$$ROOT",
-                    },
-                  },
-                },
-                {
-                  $replaceRoot: { newRoot: "$latestDocument" },
-                },
-                {
-                  $skip: skip,
-                },
-                {
-                  $limit: batchSize,
-                },
-              ])
-              .toArray()
-          ).forEach((obj) => {
-            // push all to the result
-            result.push(obj);
+          // get the page and check its content before moving on...
+          await getPage().then((page) => {
+            // compare the len before to the len after to make sure we're fetching every document
+            const beforeLen = result.length;
+            // process the page results
+            page.forEach((obj) => {
+              if (obj) {
+                // store into kv
+                this.kv[ref][obj.id] = obj;
+                // push all to the result
+                result.push(obj);
+              }
+            });
+            // move the skip pointer along only if we got an obj for every document in the collection
+            skip +=
+              beforeLen + batchSize === result.length ||
+              result.length >= totalCountResult
+                ? batchSize
+                : 0;
           });
-          // Process or store the documents in memory here
-          skip += batchSize;
         }
 
         // return if the collections holds values
-        if (result && result.length) return result;
+        if (result && result.length) return Object.values(this.kv[ref]);
       } else {
         // fing all on the ref table
         const result = await (
@@ -202,6 +228,15 @@ export class Mongo extends DB {
           .collection(ref)
           .find({})
           .toArray();
+
+        // place into kv store
+        result.forEach((obj) => {
+          if (obj) {
+            // store into kv
+            this.kv[ref][obj.id] = obj;
+          }
+        });
+
         // return if the collection holds values
         if (result && result.length) return result;
       }
@@ -209,8 +244,8 @@ export class Mongo extends DB {
       // can get all from kv store
       const val = this.kv[ref];
 
-      // return the collection
-      if (val) return Object.values(val);
+      // return the collection based on keys
+      if (val) return Object.keys(val).map((valKey) => val[valKey]);
     }
 
     // throw not found to indicate we can't find it
@@ -234,28 +269,22 @@ export class Mongo extends DB {
       if (!this.engine.readOnly) {
         // resolve db promise layer
         const db = await Promise.resolve(this.db);
-        // get the collection for this entity
-        const collection = db.collection(ref);
-
-        // this will update the most recent entry or upsert a new document (do we want this to insert a new doc every update?)
-        await collection.replaceOne(
-          {
-            id,
-            // if ids are unique then we can place by update by checking for a match on current block setup
-            ...(this.mutable || ref === "__meta__"
-              ? {}
-              : {
-                  _block_ts: val?._block_ts,
-                  _block_num: val?._block_num,
-                  _chain_id: val?._chain_id,
-                }),
-          },
-          // the replacement values
-          val,
-          {
-            upsert: true,
-          }
-        );
+        // filter for the document we want to replace
+        const filter = {
+          id,
+          // if ids are unique then we can place by update by checking for a match on current block setup
+          ...(this.mutable || ref === "__meta__"
+            ? {}
+            : {
+                _block_ts: val?._block_ts,
+                _block_num: val?._block_num,
+                _chain_id: val?._chain_id,
+              }),
+        };
+        // attempt the put and retry on failure until it succeeds (all other processing will be halted while we wait for this to complete)
+        await put(db, ref, filter, val).catch(function retry() {
+          return put(db, ref, filter, val).catch(retry);
+        });
       }
     }
 
@@ -272,22 +301,23 @@ export class Mongo extends DB {
 
     // for valid reqs...
     if (ref && id) {
-      // remove from local-cache
+      // remove from local-cache (the next time we put on this key we will produce a new empty object as starting point)
       delete this.kv[ref][id];
+
       // prevent alterations in read-only mode
       if (!this.engine.readOnly) {
-        // get the collection for this entity
-        const collection = (await Promise.resolve(this.db)).collection(ref);
+        // resolve db promise layer
+        const db = await Promise.resolve(this.db);
         // this will delete the latest entry - do we want to delete all entries??
         // would it be better to put an empty here instead?
-        const document = collection.findOne(
-          { id },
-          { sort: { _block_ts: -1 } }
-        );
+        const document = (await this.get(key)) as WithId<Document>;
 
         // delete the single document we discovered
         if (document) {
-          await collection.deleteOne(document);
+          // keep attempting the delete until it succeeds
+          await del(db, ref, document).catch(function retry() {
+            return del(db, ref, document).catch(retry);
+          });
         }
       }
     }
@@ -369,8 +399,13 @@ export class Mongo extends DB {
         // del will delete ALL entries from the collection (this shouldnt need to be called - it might be wiser to insert an empty entry than to try to delete anything)
         if (val.type === "del") {
           operations.push({
-            deleteMany: {
-              filter: { id: val.key.split(".")[1] },
+            deleteOne: {
+              filter: {
+                // each entry is unique by block and id
+                id: val.key.split(".")[1],
+              },
+              // use the _block_ts index to pick the most recent inserted
+              hint: { _block_ts: -1 },
             },
           });
           // delete the value from cache
@@ -382,6 +417,7 @@ export class Mongo extends DB {
 
       // save the batch to mongo
       if (!this.engine.readOnly && batch.length) {
+        // resolve the db
         const db = await this.db;
         // don't stop trying until this returns successfully
         await bulkWrite(db, collection, batch).catch(async function retry() {
@@ -394,13 +430,37 @@ export class Mongo extends DB {
   }
 }
 
+// attempt the put operation (we use replaceOne here and uniquify with a filter if we need to)
+const put = async (
+  db: ReturnType<MongoClient["db"]>,
+  collection: string,
+  filter: Filter<Document>,
+  replacement: WithoutId<Document>
+) => {
+  // replace with upsert to insert if filter doesnt match
+  await db.collection(collection).replaceOne(filter, replacement, {
+    upsert: true,
+  });
+};
+
+// attempt the put operation
+const del = async (
+  db: ReturnType<MongoClient["db"]>,
+  collection: string,
+  document: WithId<Document>
+) => {
+  await db.collection(collection).deleteOne({
+    // delete only the specified document
+    _id: document._id,
+  });
+};
+
 // attempt the bulkWrite operation
 const bulkWrite = async (
   db: ReturnType<MongoClient["db"]>,
   collection: string,
   batch: AnyBulkWriteOperation<Document>[]
 ) => {
-  // eslint-disable-next-line no-await-in-loop
   await db.collection(collection).bulkWrite(batch, {
     // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
     ordered: false,

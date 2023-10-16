@@ -36,14 +36,18 @@ export const exists = async (
 // read the file from disk
 export const readJSON = async <T extends Record<string, any>>(
   type: string,
-  filename: string
+  filename: string,
+  ucwd?: string
 ): Promise<T> => {
   // wrap in a try to return useful erros
   try {
     // read the file async and await its response
-    const file = await fs.promises.readFile(`${cwd}${type}-${filename}.json`, {
-      encoding: "utf8",
-    });
+    const file = await fs.promises.readFile(
+      `${ucwd || cwd}${type}-${filename}.json`,
+      {
+        encoding: "utf8",
+      }
+    );
     // parse the file
     if (file && file.length) {
       const data = JSON.parse(file);
@@ -59,14 +63,15 @@ export const readJSON = async <T extends Record<string, any>>(
 export const saveJSON = async (
   type: string,
   filename: string,
-  resData: Record<string, unknown>
+  resData: Record<string, unknown>,
+  ucwd?: string
 ): Promise<boolean> => {
   try {
     // ensure the directory exists, creating it if necessary
-    await fs.promises.access(cwd, fs.constants.F_OK);
+    await fs.promises.access(ucwd || cwd, fs.constants.F_OK);
   } catch (err) {
     if (err.code === "ENOENT") {
-      await fs.promises.mkdir(cwd);
+      await fs.promises.mkdir(ucwd || cwd);
     } else {
       throw new Error(`Error accessing directory: ${err.message}`);
     }
@@ -74,7 +79,7 @@ export const saveJSON = async (
 
   // write the file asynchronously
   await fs.promises.writeFile(
-    `${cwd}${type}-${filename}.json`,
+    `${ucwd || cwd}${type}-${filename}.json`,
     JSON.stringify(resData)
   );
 
@@ -84,10 +89,11 @@ export const saveJSON = async (
 // remove the file from disk
 export const deleteJSON = async (
   type: string,
-  filename: string
+  filename: string,
+  ucwd?: string
 ): Promise<boolean> => {
   try {
-    await fs.promises.rm(`${cwd}${type}-${filename}.json`);
+    await fs.promises.rm(`${ucwd || cwd}${type}-${filename}.json`);
     return true;
   } catch (error) {
     if (error.code === "ENOENT") {

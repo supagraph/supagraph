@@ -85,6 +85,7 @@ export const sync = async ({
   collectBlocks = false,
   collectTxReceipts = false,
   listen = false,
+  multithread = false,
   cleanup = false,
   silent = false,
   readOnly = false,
@@ -103,6 +104,7 @@ export const sync = async ({
   collectTxReceipts?: boolean;
   // control how we listen, cleanup and log data
   listen?: boolean;
+  multithread?: boolean;
   cleanup?: boolean;
   silent?: boolean;
   readOnly?: boolean;
@@ -147,6 +149,7 @@ export const sync = async ({
 
   // allow options to be set by config instead of by top level if supplied
   listen = config ? config.listen ?? listen : listen;
+  multithread = config ? config.multithread ?? multithread : multithread;
   silent = config ? config.silent ?? silent : silent;
   cleanup = config ? config.cleanup ?? cleanup : cleanup;
   collectBlocks = config
@@ -159,6 +162,7 @@ export const sync = async ({
   // set the runtime flags into the engine
   engine.flags = {
     listen,
+    multithread,
     cleanup,
     silent,
     start,
@@ -191,6 +195,8 @@ export const sync = async ({
       inSync: false,
       // this lets the provider onBlock handler know that it should be collecting blocks (this is open from start and closes on .close())
       listening: true,
+      // allow the processing to be suspending to fully exit out of the promise queue and restart the stack
+      suspended: false,
     };
 
     // set up a mutable set of handlers to monitor for halting errors so that we can unlock db before exiting
@@ -353,32 +359,26 @@ export const sync = async ({
     if (listen) {
       // attach close mech to engine
       engine.close = async () => listeners[0]();
-      // open after a tick to start after returning catchup summary response
-      setTimeout(() => {
-        // print that we're opening the listeners
-        if (!silent) console.log("\n===\n\nProcessing listeners...");
-        // open the listener queue for resolution
-        controls.inSync = true;
-        // we could close and reopen the listeners every x seconds to clear anything which is stuck in garbage
-        attachBlockProcessing(controls, errorHandler).then(
-          async function reattach() {
-            // if we havent throw an error and exited the process...
-            if (!errorHandler.resolved) {
-              // start listening again
-              controls.listening = true;
-              // keep reattaching on close to keep the heap clean
-              return new Promise((resolve) => {
-                setTimeout(() => {
-                  resolve(
-                    attachBlockProcessing(controls, errorHandler).then(reattach)
-                  );
-                });
-              });
-            }
-            return false;
+      // print that we're opening the listeners
+      if (!silent) console.log("\n===\n\nProcessing listeners...");
+      // open the listener queue for resolution
+      controls.inSync = true;
+      // attach processing with an async promise queue which restarts when it empties
+      attachBlockProcessing(controls, errorHandler).then(
+        async function reattach() {
+          // if we havent throw an error and exited the process...
+          if (!errorHandler.resolved) {
+            // start listening again
+            controls.suspended = false;
+            // keep reattaching on close until the error handler resolves
+            return new Promise((resolve) => {
+              resolve(attachBlockProcessing(controls, errorHandler));
+            }).then(reattach);
           }
-        );
-      });
+          // end when errorHandler is resolved
+          return false;
+        }
+      );
     } else {
       // set syncing to false
       engine.syncing = false;

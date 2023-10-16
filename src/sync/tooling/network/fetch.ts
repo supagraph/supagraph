@@ -43,11 +43,15 @@ export const attemptFnCall = async <T extends Record<string, any>>(
           ]);
 
     // wrap call to get receipt from custom handler
-    const call =
+    const call: (hash: unknown) => Promise<T> =
       fn === "getTransactionReceipt"
         ? async (hash: unknown) =>
-            getTransactionReceipt(provider, hash as string)
-        : async (hash: unknown) => provider[fn](hash as string);
+            getTransactionReceipt(
+              provider,
+              hash as string
+            ) as unknown as Promise<T>
+        : async (hash: unknown) =>
+            provider[fn](hash as string) as unknown as Promise<T>;
 
     // attempt to get the block from the connected provider first
     call(dets.data[prop])

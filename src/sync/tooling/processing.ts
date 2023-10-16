@@ -794,9 +794,6 @@ export const processListenerBlock = async (
           number: block.number,
         } as unknown as Block;
 
-        // always delete the block and receipts from tmp storage - we'll never use it again
-        await deleteJSON("blockAndReceipts", `${chainId}-${+block.number}`);
-
         // update the pointers to reflect the latest sync
         await updateSyncPointers(
           // these events follow enough to pass as SyncEvents
@@ -807,6 +804,19 @@ export const processListenerBlock = async (
 
         // finished after updating pointers
         if (!silent) process.stdout.write(`✔\n`);
+
+        // always delete the block and receipts from tmp storage - we'll never use it again
+        await deleteJSON(
+          "blockAndReceipts",
+          `${chainId}-${+block.number}`
+        ).catch(() => {
+          // print/noop error
+          if (!engine.flags.silent)
+            console.log(
+              "Error: problems deleting file",
+              `${chainId}-${+block.number}`
+            );
+        });
       }
     }
   }

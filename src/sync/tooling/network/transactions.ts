@@ -1,6 +1,6 @@
 import {
   Block,
-  BlockWithTransactions,
+  TransactionReceipt,
   TransactionResponse,
 } from "@ethersproject/abstract-provider";
 import { JsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
@@ -14,28 +14,53 @@ import { createBlockRanges } from "@/sync/tooling/network/blocks";
 // get a full transaction receipt from hash
 export const getTransactionReceipt = async (
   provider: JsonRpcProvider | WebSocketProvider,
-  txHash: string | TransactionResponse
-): Promise<BlockWithTransactions & any> => {
-  try {
-    // use response as given or fetch complete
-    const tx = (txHash as TransactionResponse)?.hash
-      ? txHash
-      : await provider.send("eth_getTransactionByHash", [txHash]);
-    // fetch receipt (from tx.hash which will always be present on response)
-    const receipt = await provider.send("eth_getTransactionReceipt", [tx.hash]);
-    // check the result holds data
-    if (!receipt?.transactionHash || !tx.hash) {
-      throw new Error("No tx response");
-    }
+  txHash: string | TransactionResponse,
+  maxRetries: number = 3,
+  retryDelay: number = 1000
+): Promise<TransactionReceipt> => {
+  let retries = 0;
+  let txReceipt: TransactionReceipt;
+  // keep attempting upto retry limit
+  while (retries < maxRetries) {
+    try {
+      const tx = (txHash as TransactionResponse)?.hash
+        ? txHash
+        : await provider.send("eth_getTransactionByHash", [txHash]);
+      const receipt = await provider.send("eth_getTransactionReceipt", [
+        tx.hash,
+      ]);
 
-    // this will combine both for all the details
-    return {
-      ...tx,
-      ...receipt,
-    };
-  } catch {
-    return getTransactionReceipt(provider, txHash);
+      // if we discovered the block record it
+      if (receipt && receipt.transactionHash && tx.hash) {
+        // set for returning
+        txReceipt = {
+          ...tx,
+          ...receipt,
+        };
+        // break the while loop on success
+        break;
+      } else {
+        // throw to retry/end
+        throw new Error("No transaction response");
+      }
+    } catch (error) {
+      // catch any errors
+      retries += 1;
+
+      // timeout with a delay
+      if (retries < maxRetries) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, retryDelay);
+        });
+      } else {
+        // handle when maximum retries are reached, e.g., log an error or throw an exception.
+        throw error;
+      }
+    }
   }
+
+  // return the tx
+  return txReceipt;
 };
 
 // pull all transactions in the requested range

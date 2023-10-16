@@ -83,6 +83,7 @@ export type Engine = {
     collectBlocks?: boolean;
     collectTxReceipts?: boolean;
     listen?: boolean;
+    multithread?: boolean;
     cleanup?: boolean;
     silent?: boolean;
   };
@@ -178,6 +179,8 @@ export type SyncConfig = {
   reset?: boolean;
   // boolean to start the listening service to keep the chain insync
   listen?: boolean;
+  // run listen-modes block collection by spawning child_processes to handle network and disk ops
+  multithread?: boolean;
   // clean up initial sync tmp files
   cleanup?: boolean;
   // optionally silence std-out until error
