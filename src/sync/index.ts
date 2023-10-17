@@ -363,6 +363,14 @@ export const sync = async ({
       if (!silent) console.log("\n===\n\nProcessing listeners...");
       // open the listener queue for resolution
       controls.inSync = true;
+      // restart processing
+      const restartProcessing = (reattach: () => Promise<false | void>) => {
+        return new Promise<void>((resolve) => {
+          setImmediate(() => {
+            attachBlockProcessing(controls, errorHandler).then(() => resolve());
+          });
+        }).then(reattach);
+      };
       // attach processing with an async promise queue which restarts when it empties
       attachBlockProcessing(controls, errorHandler).then(
         async function reattach() {
@@ -373,14 +381,12 @@ export const sync = async ({
             // run garbage collection now whilst the queue is clear of any pending
             if (global.gc && typeof global.gc === "function") {
               // print the gc run
-              process.stdout.write("\n--\n\nRunning gc now...\n");
+              if (!silent) process.stdout.write("\n--\n\nRunning gc now...\n");
               // this will halt all execution until it completes
               global.gc();
             }
             // keep reattaching on close until the error handler resolves
-            return new Promise((resolve) => {
-              resolve(attachBlockProcessing(controls, errorHandler));
-            }).then(reattach);
+            return restartProcessing(reattach);
           }
           // end when errorHandler is resolved
           return false;
