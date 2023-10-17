@@ -370,6 +370,13 @@ export const sync = async ({
           if (!errorHandler.resolved) {
             // start listening again
             controls.suspended = false;
+            // run garbage collection now whilst the queue is clear of any pending
+            if (global.gc && typeof global.gc === "function") {
+              // print the gc run
+              process.stdout.write("\n--\n\nRunning gc now...\n");
+              // this will halt all execution until it completes
+              global.gc();
+            }
             // keep reattaching on close until the error handler resolves
             return new Promise((resolve) => {
               resolve(attachBlockProcessing(controls, errorHandler));

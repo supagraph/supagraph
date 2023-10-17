@@ -1,3 +1,4 @@
+/* eslint-disable import/no-import-module-exports */
 import {
   JsonRpcProvider,
   TransactionResponse,
@@ -69,53 +70,55 @@ export const saveListenerBlockAndReceipts = async (
       }, 30000); // 30seconds
 
       // get the full block details
-      getBlockByNumber(provider, number).then(async (block) => {
-        // if any of the receipt collects fails then we can fail the whole op
-        const receipts = (
-          (await Promise.all(
-            block.transactions.map(
-              async (tx) =>
-                tx &&
-                (await getReceipt(tx, +chainId, provider, tmpDir, cleanup))
-            )
-          ).catch(reject)) || []
-        ).reduce((all, receipt) => {
-          // combine all receipts to create an indexed lookup obj
-          return !receipt?.transactionHash
-            ? all
-            : {
-                ...all,
-                [receipt.transactionHash]: receipt,
-              };
-        }, {});
+      getBlockByNumber(provider, number)
+        .then(async (block) => {
+          // if any of the receipt collects fails then we can fail the whole op
+          const receipts = (
+            (await Promise.all(
+              block.transactions.map(
+                async (tx) =>
+                  tx &&
+                  (await getReceipt(tx, +chainId, provider, tmpDir, cleanup))
+              )
+            ).catch(reject)) || []
+          ).reduce((all, receipt) => {
+            // combine all receipts to create an indexed lookup obj
+            return !receipt?.transactionHash
+              ? all
+              : {
+                  ...all,
+                  [receipt.transactionHash]: receipt,
+                };
+          }, {});
 
-        // if we're tmp storing data...
-        if (!cleanup) {
-          // save the block for sync-cache
+          // if we're tmp storing data...
+          if (!cleanup) {
+            // save the block for sync-cache
+            await saveJSON(
+              "blocks",
+              `${chainId}-${+block.number}`,
+              {
+                block,
+              },
+              tmpDir
+            ).catch(reject);
+          }
+
+          // save everything together to reduce readback i/o (if we're using cleanup true - this is all we will save - we will delete it after processing)
           await saveJSON(
-            "blocks",
+            "blockAndReceipts",
             `${chainId}-${+block.number}`,
             {
               block,
+              receipts,
             },
             tmpDir
           ).catch(reject);
-        }
 
-        // save everything together to reduce readback i/o (if we're using cleanup true - this is all we will save - we will delete it after processing)
-        await saveJSON(
-          "blockAndReceipts",
-          `${chainId}-${+block.number}`,
-          {
-            block,
-            receipts,
-          },
-          tmpDir
-        ).catch(reject);
-
-        // saved - return true to outer
-        resolve(true);
-      });
+          // saved - return true to outer
+          resolve(true);
+        })
+        .catch(reject);
     });
 
     // return promise to outer (timesout after 30s)
@@ -138,7 +141,7 @@ export const saveListenerBlockAndReceipts = async (
 };
 
 // check that this is the main import script before processing the components
-if (require.main === module) {
+if (require.main.filename === module.filename) {
   // attempt the operation
   try {
     // Check if the correct number of command-line arguments are provided
@@ -158,12 +161,19 @@ if (require.main === module) {
     const tmpDir = process.argv[5];
     const cleanup = process.argv[6] === "true";
 
+    // timeout here to make sure this closes
+    const timeout = setTimeout(() => {
+      process.exit(1);
+    }, 30000);
+
     // save the block and receipt and exit this process
     saveListenerBlockAndReceipts(block, chainId, providerUrl, tmpDir, cleanup)
       .then(() => {
+        clearTimeout(timeout);
         process.exit(0);
       })
       .catch((error) => {
+        clearTimeout(timeout);
         console.error("Error:", error);
         process.exit(1);
       });

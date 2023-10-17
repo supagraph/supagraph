@@ -217,8 +217,11 @@ export const saveLatestRunCapture = async (
   });
 
   // write to a new document each run
-  const savingProcess = new Promise((resolve) => {
-    writer.pipe(writableStream).on("finish", () => resolve(true));
+  const savingProcess = new Promise((resolve, reject) => {
+    writer
+      .pipe(writableStream)
+      .on("finish", () => resolve(true))
+      .on("error", (error) => reject(error));
   });
 
   // stream writes to the csv document
@@ -315,9 +318,12 @@ export const doCleanup = async (
           );
         }
       })
-    );
+    ).catch(() => {
+      // attempt the cleanup again - if everything is clean we should return true from deleteJSON
+      doCleanup(events, silent, start, stop);
+    });
   }
 
-  // mark as completed in stdout
+  // mark as complete in stdout
   if (!silent) process.stdout.write("✔\n");
 };

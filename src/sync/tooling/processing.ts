@@ -425,7 +425,7 @@ export const processListenerBlock = async (
   // log that we're syncing the block
   if (!silent)
     process.stdout.write(
-      `--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})\n`
+      `\n--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})\n`
     );
 
   // log that we're starting (*note that writing to stdout directly will bypass chromes inspector logs)

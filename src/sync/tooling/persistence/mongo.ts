@@ -26,14 +26,14 @@ export class Mongo extends DB {
   // underlying mongo client
   client: MongoClient | Promise<MongoClient>;
 
-  // selected db on the mongo client
-  db: ReturnType<MongoClient["db"]> | Promise<ReturnType<MongoClient["db"]>>;
-
   // name given to the db on the mongo client
   name: string;
 
   // are the entities in this db being upserted or not?
   mutable: boolean;
+
+  // selected db on the mongo client
+  _db: ReturnType<MongoClient["db"]> | Promise<ReturnType<MongoClient["db"]>>;
 
   // construct a kv store
   constructor(
@@ -53,10 +53,30 @@ export class Mongo extends DB {
     this.mutable = mutable || false;
     // associate the engine
     this.engine = engine || ({} as Engine);
-    // resolve the client then attach the named db
-    this.db = Promise.resolve(client).then((mongo) =>
-      mongo.db(name || "supagraph")
-    );
+    // store the db client
+    this._db = this.db();
+  }
+
+  async db() {
+    // return a new client connection
+    const client = await this.client;
+
+    // reopen the connection incase it is closed
+    await client.connect();
+
+    // connect it to mongodb
+    return client.db(this.name || "supagraph");
+  }
+
+  async resetConnection() {
+    // return a new client connection
+    const client = await this.client;
+
+    // close the connection
+    await client.close();
+
+    // set the db against context to reopen the connection
+    this._db = this.db();
   }
 
   // create a new instance statically
@@ -115,7 +135,7 @@ export class Mongo extends DB {
       (!this.engine.warmDb || ref === "__meta__")
     ) {
       // this wants to get only the most recent insertion
-      const result = await (await Promise.resolve(this.db))
+      const result = await (await this._db)
         .collection(ref)
         .findOne({ id }, { sort: { _block_ts: -1 } });
 
@@ -136,7 +156,7 @@ export class Mongo extends DB {
       // return a materialised view for immutable collection - this will get a snapshot of the most recent state for each id...
       if (!this.mutable && ref !== "__meta__") {
         // get collection for the ref
-        const collection = (await Promise.resolve(this.db)).collection(ref);
+        const collection = (await this._db).collection(ref);
         // get the total number of results we expect to retrieve
         const totalCountAggregate = collection.aggregate([
           {
@@ -222,7 +242,7 @@ export class Mongo extends DB {
       } else {
         // fing all on the ref table
         const result = await (
-          await Promise.resolve(this.db)
+          await this._db
         )
           // if we're immutable then get from the materialised view
           .collection(ref)
@@ -268,7 +288,7 @@ export class Mongo extends DB {
       // prevent alterations in read-only mode
       if (!this.engine.readOnly) {
         // resolve db promise layer
-        const db = await Promise.resolve(this.db);
+        const db = await this._db;
         // filter for the document we want to replace
         const filter = {
           id,
@@ -307,7 +327,7 @@ export class Mongo extends DB {
       // prevent alterations in read-only mode
       if (!this.engine.readOnly) {
         // resolve db promise layer
-        const db = await Promise.resolve(this.db);
+        const db = await this._db;
         // this will delete the latest entry - do we want to delete all entries??
         // would it be better to put an empty here instead?
         const document = (await this.get(key)) as WithId<Document>;
@@ -418,7 +438,7 @@ export class Mongo extends DB {
       // save the batch to mongo
       if (!this.engine.readOnly && batch.length) {
         // resolve the db
-        const db = await this.db;
+        const db = await this._db;
         // don't stop trying until this returns successfully
         await bulkWrite(db, collection, batch).catch(async function retry() {
           return bulkWrite(db, collection, batch).catch(retry);

@@ -6,7 +6,7 @@ import { TransactionResponse } from "@ethersproject/abstract-provider";
 
 import { getEngine } from "@/sync/tooling/persistence/store";
 import { processListenerBlock } from "@/sync/tooling/processing";
-import { saveJSON, readJSON, cwd } from "@/sync/tooling/persistence/disk";
+import { cwd, saveJSON, readJSON } from "@/sync/tooling/persistence/disk";
 
 import { AsyncBlockParts, Migration, Sync } from "@/sync/types";
 
@@ -27,7 +27,7 @@ export const createListener = (
     // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
     if (state.listening) {
       // push to the block stack to signal the block is retrievable
-      await recordListenerBlock(number, +chainId);
+      recordListenerBlock(number, +chainId);
     }
   };
 };
@@ -327,7 +327,8 @@ export async function saveListenerBlockAndReceiptsInSpawnedProcess(
       "node",
       [
         // absolute path to the child process script
-        `${__dirname}/process/saveBlock.js`,
+        // `${__dirname}/process/saveBlock.js`,
+        `${process.cwd()}/node_modules/supagraph/dist/sync/tooling/network/process/saveBlock.js`,
         // pass args as strings (we will resolve them on the otherside)
         block.toString(10),
         chainId.toString(10),
