@@ -212,7 +212,6 @@ if (require.main.filename === module.filename) {
   try {
     // Check if the correct number of command-line arguments are provided
     if (process.argv.length < 5) {
-      console.log(process.argv);
       console.error(
         "Usage: node saveBlock.js <block> <chainId> <providerUrl> <tmpDir?> <cleanup?>"
       );
