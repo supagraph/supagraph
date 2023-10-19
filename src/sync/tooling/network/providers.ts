@@ -62,6 +62,23 @@ export const mapProviders = async (syncOp: Sync) => {
   return syncOp.provider;
 };
 
+// replace the provider on the syncOp
+export const replaceMapProviders = async (syncOp: Sync) => {
+  // drop all listeners on the current provider
+  syncOp.provider.removeAllListeners();
+  // construct new syncOp
+  syncOp.provider = new JsonRpcProvider(syncOp.provider.connection.url);
+  // if the network is resolved for the provider...
+  if (syncOp.provider.network?.chainId) {
+    // record the provider for the chain
+    return syncOp.provider;
+  }
+  // get the network from the provider
+  await syncOp.provider.getNetwork();
+  // record the provider for the chain
+  return syncOp.provider;
+};
+
 // reduce the providers
 export const reduceProviders = (
   all: Record<number, JsonRpcProvider | WebSocketProvider>,
@@ -84,6 +101,33 @@ export const getNetworks = async (useSyncs?: Sync[]) => {
     reduceProviders,
     {} as Record<number, JsonRpcProvider | WebSocketProvider>
   );
+
+  // return both chainIds and syncProviders
+  return {
+    // return all providers
+    syncProviders,
+    // index the chains defined
+    chainIds: new Set<number>([...Object.keys(syncProviders).map((v) => +v)]),
+  };
+};
+
+// get all networks chainIds
+export const recreateNetworks = async (useSyncs?: Sync[]) => {
+  // retrieve the engine backing the Store
+  const engine = await getEngine();
+
+  // get all network descriptions now...
+  const syncProviders = (
+    await Promise.all((useSyncs || engine.syncs).map(replaceMapProviders))
+  ).reduce(
+    reduceProviders,
+    {} as Record<number, JsonRpcProvider | WebSocketProvider>
+  );
+
+  // move the start block along by 1
+  Object.keys(syncProviders).forEach((chainId) => {
+    engine.startBlocks[+chainId] = engine.startBlocks[+chainId] + 1;
+  });
 
   // return both chainIds and syncProviders
   return {

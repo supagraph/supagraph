@@ -13,7 +13,7 @@ import {
   getEngine,
   checkLocks,
   promiseQueue,
-  attachListeners,
+  createListeners,
   applyMigrations,
   getNewSyncEvents,
   getNewSyncEventsBlocks,
@@ -89,6 +89,7 @@ export const sync = async ({
   cleanup = false,
   silent = false,
   readOnly = false,
+  noop = false,
   onError = async (_, reset) => {
     // reset the locks by default
     await reset();
@@ -108,6 +109,7 @@ export const sync = async ({
   cleanup?: boolean;
   silent?: boolean;
   readOnly?: boolean;
+  noop?: boolean;
   // position which stage we should start and stop the sync
   start?: keyof typeof SyncStage | false;
   stop?: keyof typeof SyncStage | false;
@@ -151,6 +153,7 @@ export const sync = async ({
   listen = config ? config.listen ?? listen : listen;
   multithread = config ? config.multithread ?? multithread : multithread;
   silent = config ? config.silent ?? silent : silent;
+  noop = config ? config.noop ?? noop : noop;
   cleanup = config ? config.cleanup ?? cleanup : cleanup;
   collectBlocks = config
     ? config.collectBlocks ?? collectBlocks
@@ -165,6 +168,7 @@ export const sync = async ({
     multithread,
     cleanup,
     silent,
+    noop,
     start,
     stop,
     collectBlocks,
@@ -206,64 +210,25 @@ export const sync = async ({
       resolve?: (value: void | PromiseLike<void>) => void;
     } = {};
 
+    // create promise and apply handlers to obj
+    const errorPromise = new Promise<void>((resolve, reject) => {
+      errorHandler.reject = reject;
+      errorHandler.resolve = resolve;
+    }).then(() => {
+      // mark as resolved
+      errorHandler.resolved = true;
+    });
+
     // event listener will see all blocks and transactions passing everything to appropriate handlers in block/tx/log order (grouped by type)
     if (listen) {
-      // create promise and apply handlers to obj
-      const errorPromise = new Promise<void>((resolve, reject) => {
-        errorHandler.reject = reject;
-        errorHandler.resolve = resolve;
-      }).then(() => {
-        // mark as resolved
-        errorHandler.resolved = true;
-      });
-      // do listener opening stuff...
-      listeners.push(
-        await Promise.resolve().then(async () => {
-          // attach controls to listerner and start collecting new blocks
-          const attached = await attachListeners(
-            controls,
-            migrations,
-            errorHandler
-          );
-
-          // return a method to remove all handlers
-          const close = async (): Promise<void> => {
-            return new Promise((resolve) => {
-              // place in the next call-frame
-              setTimeout(async () => {
-                // notify in stdout that we're closing the connection
-                if (!silent) console.log("\nClosing listeners\n\n===\n");
-                // close the loop
-                controls.listening = false;
-                // close the lock
-                engine.syncing = false;
-                // await removal of listeners and current block
-                await Promise.all(
-                  attached.map(async (detach) => detach && (await detach()))
-                );
-                // mark error as resolved - we won't use the promise again
-                if (!errorHandler.resolved && errorHandler.resolve) {
-                  errorHandler.resolve();
-                }
-                // give other watchers chance to see this first - but kill the process on error (this gives implementation oppotunity to restart)
-                setTimeout(() => process.exit(1));
-                // resolve the promise
-                resolve();
-              });
-            });
-          };
-
-          // attach errors and pass to handler to close the connection
-          errorPromise.catch(async (e) => {
-            // assign error for just-in-case
-            engine.error = e;
-            // chain error through user handler
-            return onError(e, close);
-          });
-
-          // return close to allow external closure
-          return close;
-        })
+      // create the listener set for the syncOps
+      await createListeners(
+        listeners,
+        controls,
+        migrations,
+        errorHandler,
+        errorPromise,
+        onError
       );
     }
 
@@ -358,13 +323,16 @@ export const sync = async ({
     // place in the microtask queue to open listeners after we return the sync summary and close fn
     if (listen) {
       // attach close mech to engine
-      engine.close = async () => listeners[0]();
+      engine.close = async () => listeners[1]();
       // print that we're opening the listeners
       if (!silent) console.log("\n===\n\nProcessing listeners...");
       // open the listener queue for resolution
       controls.inSync = true;
       // restart processing
-      const restartProcessing = (reattach: () => Promise<false | void>) => {
+      const restartProcessing = async (
+        reattach: () => Promise<false | void>
+      ) => {
+        // return the block processing chain
         return new Promise<void>((resolve) => {
           setImmediate(() => {
             attachBlockProcessing(controls, errorHandler).then(() => resolve());

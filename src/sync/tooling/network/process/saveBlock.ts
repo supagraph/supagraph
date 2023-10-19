@@ -1,8 +1,8 @@
 /* eslint-disable import/no-import-module-exports */
 import {
   JsonRpcProvider,
+  TransactionReceipt,
   TransactionResponse,
-  WebSocketProvider,
 } from "@ethersproject/providers";
 import { ConnectionInfo } from "ethers/lib/utils";
 
@@ -15,18 +15,65 @@ import { saveJSON } from "../../persistence/disk";
 const getReceipt = async (
   tx: string | TransactionResponse,
   chainId: number,
-  provider: JsonRpcProvider | WebSocketProvider,
+  rpcUrl: string | ConnectionInfo,
   tmpDir?: string,
   cleanup?: any
 ) => {
-  // this promise.all is trapped until we resolve all tx receipts in the block
-  try {
-    // get the receipt
-    const fullTx = await getTransactionReceipt(provider, tx);
+  return new Promise<TransactionReceipt>(
+    getReceiptPromise(tx, chainId, rpcUrl, tmpDir, cleanup)
+  );
+};
 
+// promise internals to get a receipt
+const getReceiptPromise =
+  (
+    tx: string | TransactionResponse,
+    chainId: number,
+    rpcUrl: string | ConnectionInfo,
+    tmpDir?: string,
+    cleanup?: any
+  ) =>
+  (
+    resolve: (
+      value: TransactionReceipt | PromiseLike<TransactionReceipt>
+    ) => void,
+    reject: (reason?: any) => void
+  ) => {
+    // timeout after x seconds
+    const timeout = setTimeout(() => {
+      reject(
+        new Error(`Error: timeout ${typeof tx === "string" ? tx : tx.hash}`)
+      );
+    }, 10000); // 10seconds
+
+    // get a new provider with the given rpcUrl
+    const provider = new JsonRpcProvider(rpcUrl);
+
+    // get the receipt
+    getTransactionReceipt(provider, tx)
+      .then(saveReceipt(timeout, resolve, chainId, tmpDir, cleanup))
+      .catch(rejectReceipt(timeout, reject));
+  };
+
+// reject receipt handling
+const rejectReceipt =
+  (timeout: NodeJS.Timeout, reject: (reason?: any) => void) => (e: any) => {
+    clearTimeout(timeout);
+    reject(e);
+  };
+
+// save the receipt and close the resolve
+const saveReceipt =
+  (
+    timeout: NodeJS.Timeout,
+    resolve: (value: TransactionReceipt) => void,
+    chainId: number,
+    tmpDir: string,
+    cleanup: any
+  ) =>
+  async (fullTx: TransactionReceipt) => {
     // try again
     if (!fullTx.transactionHash) throw new Error("Missing hash");
-
     // if we're tmp storing data...
     if (!cleanup) {
       // save each tx to disk to release from mem
@@ -37,14 +84,11 @@ const getReceipt = async (
         tmpDir
       );
     }
-
+    // clear the error throwing timeout
+    clearTimeout(timeout);
     // return the tx
-    return fullTx;
-  } catch {
-    // attempt to get receipt again on failure
-    return getReceipt(tx, chainId, provider, tmpDir, cleanup);
-  }
-};
+    resolve(fullTx);
+  };
 
 // pull all block and receipt details (cancel attempt after 30s) (race and retry inside here?)
 export const saveListenerBlockAndReceipts = async (
@@ -55,7 +99,30 @@ export const saveListenerBlockAndReceipts = async (
   cleanup?: boolean
 ) => {
   // return a promise to resolve the block & transactions and save them to disk
-  return new Promise<boolean>((outerResolve, outerReject) => {
+  return new Promise<boolean>(
+    saveListenerBlockAndReceiptsPromise(
+      number,
+      chainId,
+      rpcUrl,
+      tmpDir,
+      cleanup
+    )
+  );
+};
+
+// closure to return the promise method
+const saveListenerBlockAndReceiptsPromise =
+  (
+    number: number,
+    chainId: number,
+    rpcUrl: string | ConnectionInfo,
+    tmpDir?: string,
+    cleanup?: boolean
+  ) =>
+  (
+    outerResolve: (value: boolean | PromiseLike<boolean>) => void,
+    outerReject: (reason?: any) => void
+  ) => {
     // store ref to the timeout
     let timeout: NodeJS.Timeout;
 
@@ -78,7 +145,7 @@ export const saveListenerBlockAndReceipts = async (
               block.transactions.map(
                 async (tx) =>
                   tx &&
-                  (await getReceipt(tx, +chainId, provider, tmpDir, cleanup))
+                  (await getReceipt(tx, +chainId, rpcUrl, tmpDir, cleanup))
               )
             ).catch(reject)) || []
           ).reduce((all, receipt) => {
@@ -137,8 +204,7 @@ export const saveListenerBlockAndReceipts = async (
         // carry the error to parent
         outerReject(e);
       });
-  });
-};
+  };
 
 // check that this is the main import script before processing the components
 if (require.main.filename === module.filename) {

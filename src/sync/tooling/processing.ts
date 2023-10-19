@@ -108,7 +108,28 @@ export const processCallback = async (
       // set the block for each operation into the runtime engine before we run the handler
       Store.setBlock(
         block && block.timestamp
-          ? block
+          ? {
+              hash: block.hash,
+              parentHash: block.parentHash,
+              number: block.number,
+              timestamp: block.timestamp,
+              nonce: block.nonce,
+              difficulty: block.difficulty,
+              _difficulty: block._difficulty,
+              gasLimit: block.gasLimit,
+              gasUsed: block.gasUsed,
+              miner: block.miner,
+              extraData: block.extraData,
+              baseFeePerGas: block.baseFeePerGas,
+              transactions: [
+                ...block.transactions.map((blockTx: { hash: any } | string) => {
+                  // take a copy of each tx to drop assoc
+                  return typeof blockTx === "string"
+                    ? blockTx
+                    : JSON.parse(JSON.stringify(blockTx));
+                }),
+              ],
+            }
           : ({
               timestamp: event.timestamp || event.data.blockNumber,
               number: event.data.blockNumber,
@@ -157,7 +178,26 @@ export const processCallback = async (
       // set the chainId into the engine
       Store.setChainId(event.chainId);
       // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(block);
+      Store.setBlock({
+        hash: block.hash,
+        parentHash: block.parentHash,
+        number: block.number,
+        timestamp: block.timestamp,
+        nonce: block.nonce,
+        difficulty: block.difficulty,
+        _difficulty: block._difficulty,
+        gasLimit: block.gasLimit,
+        gasUsed: block.gasUsed,
+        miner: block.miner,
+        extraData: block.extraData,
+        baseFeePerGas: block.baseFeePerGas,
+        transactions: [
+          ...block.transactions.map((tx: { hash: any }) => {
+            // take a copy of each tx to drop assoc
+            return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
+          }),
+        ],
+      });
       // await the response of the handler before moving to the next operation in the sorted ops
       await (event.onEvent && typeof event.onEvent === "function"
         ? event.onEvent
@@ -186,7 +226,26 @@ export const processCallback = async (
       // set the chainId into the engine
       Store.setChainId(event.chainId);
       // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(block);
+      Store.setBlock({
+        hash: block.hash,
+        parentHash: block.parentHash,
+        number: block.number,
+        timestamp: block.timestamp,
+        nonce: block.nonce,
+        difficulty: block.difficulty,
+        _difficulty: block._difficulty,
+        gasLimit: block.gasLimit,
+        gasUsed: block.gasUsed,
+        miner: block.miner,
+        extraData: block.extraData,
+        baseFeePerGas: block.baseFeePerGas,
+        transactions: [
+          ...block.transactions.map((tx: { hash: any }) => {
+            // take a copy of each tx to drop assoc
+            return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
+          }),
+        ],
+      });
       // await the response of the handler before moving to the next operation in the sorted ops
       await engine.callbacks[`${event.chainId}-${event.type}`]?.(
         // pass the parsed args construct
@@ -220,7 +279,28 @@ export const processCallback = async (
       // set the chainId into the engine
       Store.setChainId(event.chainId);
       // set the block for each operation into the runtime engine before we run the handler
-      Store.setBlock(block);
+      Store.setBlock({
+        hash: block.hash,
+        parentHash: block.parentHash,
+        number: block.number,
+        timestamp: block.timestamp,
+        nonce: block.nonce,
+        difficulty: block.difficulty,
+        _difficulty: block._difficulty,
+        gasLimit: block.gasLimit,
+        gasUsed: block.gasUsed,
+        miner: block.miner,
+        extraData: block.extraData,
+        baseFeePerGas: block.baseFeePerGas,
+        transactions: [
+          ...block.transactions.map((blockTx: { hash: any } | string) => {
+            // take a copy of each tx to drop assoc
+            return typeof blockTx === "string"
+              ? blockTx
+              : JSON.parse(JSON.stringify(blockTx));
+          }),
+        ],
+      });
       // await the response of the handler before moving to the next operation in the sorted ops
       await engine.callbacks[
         `${
@@ -442,7 +522,26 @@ export const processListenerBlock = async (
     // set the chainId into the engine
     Store.setChainId(chainId);
     // set the block for each operation into the engine before we run the handler
-    Store.setBlock(block);
+    Store.setBlock({
+      hash: block.hash,
+      parentHash: block.parentHash,
+      number: block.number,
+      timestamp: block.timestamp,
+      nonce: block.nonce,
+      difficulty: block.difficulty,
+      _difficulty: block._difficulty,
+      gasLimit: block.gasLimit,
+      gasUsed: block.gasUsed,
+      miner: block.miner,
+      extraData: block.extraData,
+      baseFeePerGas: block.baseFeePerGas,
+      transactions: [
+        ...block.transactions.map((tx: { hash: any }) => {
+          // take a copy of each tx to drop assoc
+          return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
+        }),
+      ],
+    });
 
     // check if any migration is relevant in this block
     if (migrations[`${chainId}-${+block.number}`]) {
@@ -569,12 +668,14 @@ export const processListenerBlock = async (
               blockNumber: block.number,
               eventName: op.eventName,
               args: [],
-              tx: {
-                ...tx,
-                ...(collectTxReceipts || op.opts?.collectTxReceipts
-                  ? receipts[tx.hash]
-                  : ({} as unknown as TransactionReceipt)),
-              },
+              tx: JSON.parse(
+                JSON.stringify({
+                  ...tx,
+                  ...(collectTxReceipts || op.opts?.collectTxReceipts
+                    ? receipts[tx.hash]
+                    : ({} as unknown as TransactionReceipt)),
+                })
+              ),
               // onTx first out of tx & events
               txIndex: receipts[tx.hash].transactionIndex,
               logIndex: -1,
@@ -644,12 +745,14 @@ export const processListenerBlock = async (
                       blockNumber: block.number,
                       eventName: op.eventName,
                       args,
-                      tx: {
-                        ...tx,
-                        ...(collectTxReceipts || op.opts?.collectTxReceipts
-                          ? receipts[tx.hash]
-                          : ({} as unknown as TransactionReceipt)),
-                      },
+                      tx: JSON.parse(
+                        JSON.stringify({
+                          ...tx,
+                          ...(collectTxReceipts || op.opts?.collectTxReceipts
+                            ? receipts[tx.hash]
+                            : ({} as unknown as TransactionReceipt)),
+                        })
+                      ),
                       // order as defined
                       txIndex: receipts[tx.hash].transactionIndex,
                       logIndex:

@@ -1,19 +1,97 @@
 import { spawn } from "child_process";
 
 import { errors } from "ethers";
-import { JsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
-import { TransactionResponse } from "@ethersproject/abstract-provider";
 
 import { getEngine } from "@/sync/tooling/persistence/store";
 import { processListenerBlock } from "@/sync/tooling/processing";
-import { cwd, saveJSON, readJSON } from "@/sync/tooling/persistence/disk";
+import { cwd, deleteJSON, readJSON } from "@/sync/tooling/persistence/disk";
 
 import { AsyncBlockParts, Migration, Sync } from "@/sync/types";
 
 import { getNetworks } from "@/sync/tooling/network/providers";
-import { getTransactionReceipt } from "@/sync/tooling/network/transactions";
 
 import { saveListenerBlockAndReceipts as saveListenerBlockAndReceiptsProcess } from "@/sync/tooling/network/process/saveBlock";
+
+// create the listeners to attach to the networks
+export const createListeners = async (
+  listeners: (() => void)[],
+  controls: {
+    inSync: boolean;
+    listening: boolean;
+    suspended: boolean;
+  },
+  migrations: Migration[],
+  errorHandler: {
+    resolved?: boolean;
+    reject?: (reason?: any) => void;
+    resolve?: (value: void | PromiseLike<void>) => void;
+  },
+  errorPromise: Promise<void>,
+  onError: (e: unknown, close: () => Promise<void>) => Promise<void>
+) => {
+  // load the engine
+  const engine = await getEngine();
+
+  // clear old listeners
+  listeners.length = 0;
+
+  // attach controls to listener and start collecting new blocks
+  const attached = await attachListeners(controls, migrations, errorHandler);
+
+  // do listener opening stuff...
+  listeners.push(
+    // soft close
+    await Promise.resolve().then(async () => {
+      return async () => {
+        // await removal of listeners and current block
+        await Promise.all(
+          attached.map(async (detach) => detach && (await detach()))
+        );
+      };
+    }),
+    // hard close
+    await Promise.resolve().then(async () => {
+      // return a method to remove all handlers
+      const close = async (): Promise<void> => {
+        return new Promise((resolve) => {
+          // place in the next call-frame
+          setTimeout(async () => {
+            // notify in stdout that we're closing the connection
+            if (!engine.flags.silent)
+              console.log("\nClosing listeners\n\n===\n");
+            // close the loop
+            controls.listening = false;
+            // close the lock
+            engine.syncing = false;
+            // await removal of listeners and current block
+            await Promise.all(
+              attached.map(async (detach) => detach && (await detach()))
+            );
+            // mark error as resolved - we won't use the promise again
+            if (!errorHandler.resolved && errorHandler.resolve) {
+              errorHandler.resolve();
+            }
+            // give other watchers chance to see this first - but kill the process on error (this gives implementation oppotunity to restart)
+            setTimeout(() => process.exit(1));
+            // resolve the promise
+            resolve();
+          });
+        });
+      };
+
+      // attach errors and pass to handler to close the connection
+      errorPromise.catch(async (e) => {
+        // assign error for just-in-case
+        engine.error = e;
+        // chain error through user handler
+        return onError(e, close);
+      });
+
+      // return close to allow external closure
+      return close;
+    })
+  );
+};
 
 // create a listener to attach to the provider
 export const createListener = (
@@ -23,7 +101,7 @@ export const createListener = (
   },
   chainId: number
 ) => {
-  return async (number: number) => {
+  return (number: number) => {
     // console.log("\nPushing block:", blockNumber, "on chainId:", chainId);
     if (state.listening) {
       // push to the block stack to signal the block is retrievable
@@ -39,7 +117,7 @@ export const createErrorHandler = (
     resolve?: (value: void | PromiseLike<void>) => void;
   } = undefined
 ) => {
-  return async (error: Error & { code: string }) => {
+  return (error: Error & { code: string }) => {
     // handle the error by code...
     switch (error.code) {
       // case errors.NETWORK_ERROR:
@@ -160,44 +238,28 @@ export const attachListeners = async (
   // store all in sparse array (as obj)
   engine.indexedMigrationEntities = engine.indexedMigrationEntities || {};
 
-  // process these ops once now (then again after every block)
-  const ops = await getValidSyncOps();
-
   // attach a single listener for each provider
   const listeners = await Promise.all(
     Object.keys(syncProviders).map(async (chainId) => {
-      // proceed with valid ops
-      if (ops[+chainId].length) {
-        // construct a listener to attach to the provider
-        const listener = createListener(state, +chainId);
-        // construct an error handler to attach to the provider
-        const handler = createErrorHandler(errorHandlers);
+      // construct a listener to attach to the provider
+      const listener = createListener(state, +chainId);
+      // construct an error handler to attach to the provider
+      const handler = createErrorHandler(errorHandlers);
 
-        // attach this listener to onBlock to start collecting blocks
-        syncProviders[+chainId].on("block", listener);
-        // attach close to error handler
-        syncProviders[+chainId].on("error", handler);
+      // attach this listener to onBlock to start collecting blocks
+      syncProviders[+chainId].on("block", listener);
+      // attach close to error handler
+      syncProviders[+chainId].on("error", handler);
 
-        // return detach method to stop the handler - this will be triggered onError
-        return async () => {
-          // stop listening for new errors and blocks first
-          syncProviders[+chainId].off("error", handler);
-          syncProviders[+chainId].off("block", listener);
+      // return detach method to stop the handler - this will be triggered onError
+      return async () => {
+        // stop listening for new errors and blocks first
+        syncProviders[+chainId].off("error", handler);
+        syncProviders[+chainId].off("block", listener);
 
-          // wait for the current block to complete
-          if (engine.currentProcess) await engine.currentProcess;
-
-          // remove the lock for the next iteration
-          engine.latestEntity[chainId].set("locked", false);
-          // persist changes into the store
-          engine.latestEntity[chainId] = await engine.latestEntity[
-            chainId
-          ].save();
-        };
-      }
-
-      // no valid ops
-      return false;
+        // wait for the current block to complete
+        if (engine.currentProcess) await engine.currentProcess;
+      };
     })
   );
 
@@ -229,8 +291,36 @@ export const attachBlockProcessing = async (
     while (state.listening && !state.suspended) {
       // once the state moves to inSync - we can start taking blocks from the array to process
       if (engine.blockQueue.length && state.inSync) {
-        // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
-        await attemptNextBlock(state);
+        // if we're nooping the processing (only ingesting, we can await the saves and delete the tmp files)
+        if (engine.flags.noop) {
+          // noop the next block
+          const block = engine.blockQueue.shift();
+
+          // await the file to be saved
+          await block.asyncParts;
+
+          // delete these
+          delete engine.indexedMigrations[`${block.chainId}-${+block.number}`];
+          delete engine.indexedMigrationEntities[
+            `${block.chainId}-${+block.number}`
+          ];
+
+          // delete the block and receipts from tmp storage
+          await deleteJSON(
+            "blockAndReceipts",
+            `${block.chainId}-${+block.number}`
+          ).catch(() => {
+            // print/noop error
+            if (!engine.flags.silent)
+              console.log(
+                "Error: problems deleting file",
+                `${block.chainId}-${+block.number}`
+              );
+          });
+        } else {
+          // take the next block from the challenge queue (this operation can take up to a max of 30's before it will be cancelled and reattempted)
+          await attemptNextBlock(state);
+        }
       } else {
         // wait 1 second for something to enter the queue
         await new Promise((resolve) => {
@@ -276,41 +366,6 @@ export const getValidSyncOps: () => Promise<
     }, {});
 };
 
-// get a receipt for the given details
-export const getReceipt = async (
-  tx: TransactionResponse,
-  chainId: number,
-  provider: JsonRpcProvider | WebSocketProvider
-) => {
-  // retrieve the engine to check flags
-  const engine = await getEngine();
-
-  // this promise.all is trapped until we resolve all tx receipts in the block
-  try {
-    // get the receipt
-    const fullTx = await getTransactionReceipt(provider, tx);
-
-    // try again
-    if (!fullTx.transactionHash) throw new Error("Missing hash");
-
-    // if we're tmp storing data...
-    if (!engine.flags.cleanup) {
-      // save each tx to disk to release from mem
-      await saveJSON(
-        "transactions",
-        `${chainId}-${fullTx.transactionHash}`,
-        fullTx as unknown as Record<string, unknown>
-      );
-    }
-
-    // return the tx
-    return fullTx;
-  } catch {
-    // attempt to get receipt again on failure
-    return getReceipt(tx, chainId, provider);
-  }
-};
-
 // get data using a process to move reqs out of blocking path
 export async function saveListenerBlockAndReceiptsInSpawnedProcess(
   block: number,
@@ -318,6 +373,8 @@ export async function saveListenerBlockAndReceiptsInSpawnedProcess(
 ): Promise<boolean> {
   // retrieve engine
   const engine = await getEngine();
+
+  // retrieve providers to pull connection urls
   const { syncProviders } = await getNetworks();
 
   // spawn a child_process to save the block and transaction receipts
@@ -619,7 +676,7 @@ export const startProcessingBlock = async (
       // clear the cancelListenerBlockAfterTimeout promise (by resolving it now)
       if (typeof cancelRef.resolver !== "undefined") {
         // call resovle to clear the promise after completing this callback
-        setTimeout(cancelRef.resolve);
+        setImmediate(cancelRef.resolve);
       }
     }
   }

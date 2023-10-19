@@ -93,7 +93,25 @@ export async function addSync<T extends Record<string, unknown>>(
       onEvent: onEvent!,
     };
   } else {
-    params = chainIdOrParams;
+    // hydrate the params and excluse against
+    params = {
+      chainId: chainIdOrParams.chainId!,
+      address: chainIdOrParams.address!,
+      eventAbi: chainIdOrParams.eventAbi!,
+      eventName: chainIdOrParams.eventName!,
+      provider: chainIdOrParams.provider!,
+      startBlock: chainIdOrParams.startBlock!,
+      endBlock: chainIdOrParams.endBlock!,
+      opts: {
+        mode: "config",
+        collectBlocks: false,
+        collectTxReceipts: false,
+        // overide defaults with provided opts
+        ...(chainIdOrParams.opts || {}),
+      },
+      handlers: chainIdOrParams.handlers!,
+      onEvent: chainIdOrParams.onEvent!,
+    };
   }
 
   // no provider - but we have the chainId

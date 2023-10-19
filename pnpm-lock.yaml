@@ -98,8 +98,8 @@ devDependencies:
     specifier: ^4.0.1
     version: registry.npmjs.org/jest-extended@4.0.1(jest@29.6.4)
   mongodb:
-    specifier: ^5.6.0
-    version: registry.npmjs.org/mongodb@5.6.0
+    specifier: ^5.9.0
+    version: registry.npmjs.org/mongodb@5.9.0
   prettier:
     specifier: ^2.8.4
     version: registry.npmjs.org/prettier@2.8.4
@@ -1445,6 +1445,16 @@ packages:
       '@jridgewell/sourcemap-codec': registry.npmjs.org/@jridgewell/sourcemap-codec@1.4.15
     dev: true
 
+  registry.npmjs.org/@mongodb-js/saslprep@1.1.0:
+    resolution: {integrity: sha512-Xfijy7HvfzzqiOAhAepF4SGN5e9leLkMvg/OPOF97XemjfVCYN/oWa75wnkc6mltMSTwY+XlbhWgUOJmkFspSw==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/@mongodb-js/saslprep/-/saslprep-1.1.0.tgz}
+    name: '@mongodb-js/saslprep'
+    version: 1.1.0
+    requiresBuild: true
+    dependencies:
+      sparse-bitfield: registry.npmjs.org/sparse-bitfield@3.0.3
+    dev: true
+    optional: true
+
   registry.npmjs.org/@nodelib/fs.scandir@2.1.5:
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/@nodelib/fs.scandir/-/fs.scandir-2.1.5.tgz}
     name: '@nodelib/fs.scandir'
@@ -2359,10 +2369,10 @@ packages:
       node-int64: registry.npmjs.org/node-int64@0.4.0
     dev: true
 
-  registry.npmjs.org/bson@5.4.0:
-    resolution: {integrity: sha512-WRZ5SQI5GfUuKnPTNmAYPiKIof3ORXAF4IRU5UcgmivNIon01rWQlw5RUH954dpu8yGL8T59YShVddIPaU/gFA==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/bson/-/bson-5.4.0.tgz}
+  registry.npmjs.org/bson@5.5.0:
+    resolution: {integrity: sha512-B+QB4YmDx9RStKv8LLSl/aVIEV3nYJc3cJNNTK2Cd1TL+7P+cNpw9mAPeCgc5K+j01Dv6sxUzcITXDx7ZU3F0w==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/bson/-/bson-5.5.0.tgz}
     name: bson
-    version: 5.4.0
+    version: 5.5.0
     engines: {node: '>=14.20.1'}
     dev: true
 
@@ -5112,28 +5122,34 @@ packages:
       whatwg-url: registry.npmjs.org/whatwg-url@11.0.0
     dev: true
 
-  registry.npmjs.org/mongodb@5.6.0:
-    resolution: {integrity: sha512-z8qVs9NfobHJm6uzK56XBZF8XwM9H294iRnB7wNjF0SnY93si5HPziIJn+qqvUR5QOff/4L0gCD6SShdR/GtVQ==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/mongodb/-/mongodb-5.6.0.tgz}
+  registry.npmjs.org/mongodb@5.9.0:
+    resolution: {integrity: sha512-g+GCMHN1CoRUA+wb1Agv0TI4YTSiWr42B5ulkiAfLLHitGK1R+PkSAf3Lr5rPZwi/3F04LiaZEW0Kxro9Fi2TA==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/mongodb/-/mongodb-5.9.0.tgz}
     name: mongodb
-    version: 5.6.0
+    version: 5.9.0
     engines: {node: '>=14.20.1'}
     peerDependencies:
-      '@aws-sdk/credential-providers': ^3.201.0
+      '@aws-sdk/credential-providers': ^3.188.0
+      '@mongodb-js/zstd': ^1.0.0
+      kerberos: ^1.0.0 || ^2.0.0
       mongodb-client-encryption: '>=2.3.0 <3'
       snappy: ^7.2.2
     peerDependenciesMeta:
       '@aws-sdk/credential-providers':
+        optional: true
+      '@mongodb-js/zstd':
+        optional: true
+      kerberos:
         optional: true
       mongodb-client-encryption:
         optional: true
       snappy:
         optional: true
     dependencies:
-      bson: registry.npmjs.org/bson@5.4.0
+      bson: registry.npmjs.org/bson@5.5.0
       mongodb-connection-string-url: registry.npmjs.org/mongodb-connection-string-url@2.6.0
       socks: registry.npmjs.org/socks@2.7.1
     optionalDependencies:
-      saslprep: registry.npmjs.org/saslprep@1.0.3
+      '@mongodb-js/saslprep': registry.npmjs.org/@mongodb-js/saslprep@1.1.0
     dev: true
 
   registry.npmjs.org/ms@2.0.0:
@@ -5751,17 +5767,6 @@ packages:
       get-intrinsic: registry.npmjs.org/get-intrinsic@1.2.1
       is-regex: registry.npmjs.org/is-regex@1.1.4
     dev: true
-
-  registry.npmjs.org/saslprep@1.0.3:
-    resolution: {integrity: sha512-/MY/PEMbk2SuY5sScONwhUDsV2p77Znkb/q3nSVstq/yQzYJOH/Azh29p9oJLsl3LnQwSvZDKagDGBsBwSooag==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/saslprep/-/saslprep-1.0.3.tgz}
-    name: saslprep
-    version: 1.0.3
-    engines: {node: '>=6'}
-    requiresBuild: true
-    dependencies:
-      sparse-bitfield: registry.npmjs.org/sparse-bitfield@3.0.3
-    dev: true
-    optional: true
 
   registry.npmjs.org/scrypt-js@3.0.1:
     resolution: {integrity: sha512-cdwTTnqPu0Hyvf5in5asVdZocVDTNRmR7XEcJuIzMjJeSHybHl7vpB66AzwTaIg6CLSbtjcxc8fqcySfnTkccA==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/scrypt-js/-/scrypt-js-3.0.1.tgz}

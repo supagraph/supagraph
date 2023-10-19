@@ -86,6 +86,7 @@ export type Engine = {
     multithread?: boolean;
     cleanup?: boolean;
     silent?: boolean;
+    noop?: boolean;
   };
   currentProcess?: Promise<void>;
   close?: (() => Promise<void>) | undefined;
@@ -185,6 +186,8 @@ export type SyncConfig = {
   cleanup?: boolean;
   // optionally silence std-out until error
   silent?: boolean;
+  // disable block processing (ingestor only mode)
+  noop?: boolean;
   // set readOnly on the engine via config
   readOnly?: boolean;
   // how many rpc reqs/promises to attempt concurrently
