@@ -21,7 +21,7 @@ export const checkSchedule = async (blockTimestamp: number) => {
     try {
       // set the interval according to the expression (use utc as basis for timebound ops)
       const interval = cronParser.parseExpression(cronExpression.expr, {
-        currentDate: new Date(+blockTimestamp * 1000),
+        currentDate: new Date(),
         utc: true,
       });
       // next execution according to interval
