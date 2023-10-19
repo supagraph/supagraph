@@ -30,8 +30,11 @@ export const checkSchedule = async (blockTimestamp: number) => {
       if (!cronExpression.lastRun) {
         cronExpression.lastRun = prevExecutionTime;
       }
-      // check if the handler should run against this block
-      if (prevExecutionTime > cronExpression.lastRun) {
+      // check if the handler should run against this block (only tick over when the block reports the timestamp in the past)
+      if (
+        +blockTimestamp >= prevExecutionTime &&
+        prevExecutionTime > cronExpression.lastRun
+      ) {
         // record length of promise queue before running scheduled update
         const promiseQueueLength = engine.promiseQueue.length;
 
