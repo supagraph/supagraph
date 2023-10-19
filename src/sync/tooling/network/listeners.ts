@@ -53,23 +53,34 @@ export const createListeners = async (
     await Promise.resolve().then(async () => {
       // return a method to remove all handlers
       const close = async (): Promise<void> => {
+        // apply after a tick
         return new Promise((resolve) => {
           // place in the next call-frame
-          setTimeout(async () => {
+          setImmediate(async () => {
             // notify in stdout that we're closing the connection
-            if (!engine.flags.silent)
+            if (!engine.flags.silent && engine.syncing)
               console.log("\nClosing listeners\n\n===\n");
-            // close the loop
+            // close the loops straight away
             controls.listening = false;
+            controls.suspended = true;
             // close the lock
             engine.syncing = false;
             // await removal of listeners and current block
             await Promise.all(
               attached.map(async (detach) => detach && (await detach()))
             );
-            // mark error as resolved - we won't use the promise again
-            if (!errorHandler.resolved && errorHandler.resolve) {
-              errorHandler.resolve();
+            // mark error as rejected - we won't use the promise again
+            if (
+              !errorHandler.resolved &&
+              errorHandler.reject &&
+              errorHandler.resolve
+            ) {
+              // if theres an error pipe through on error handling
+              if (engine.error) {
+                errorHandler.reject(engine.error);
+              } else {
+                errorHandler.resolve();
+              }
             }
             // give other watchers chance to see this first - but kill the process on error (this gives implementation oppotunity to restart)
             setTimeout(() => process.exit(1));
@@ -204,6 +215,7 @@ export const attachListeners = async (
   state: {
     inSync: boolean;
     listening?: boolean;
+    suspended?: boolean;
   } = {
     inSync: true,
     listening: true,
@@ -253,6 +265,9 @@ export const attachListeners = async (
 
       // return detach method to stop the handler - this will be triggered onError
       return async () => {
+        // suspend processing on close
+        state.suspended = true;
+
         // stop listening for new errors and blocks first
         syncProviders[+chainId].off("error", handler);
         syncProviders[+chainId].off("block", listener);

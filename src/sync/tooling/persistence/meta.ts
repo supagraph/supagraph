@@ -5,7 +5,7 @@ import { Block } from "@ethersproject/abstract-provider";
 import { getNetworks, getProvider } from "@/sync/tooling/network/providers";
 
 import { syncs, setSyncs } from "@/sync/config";
-import { Handlers, Sync, SyncConfig, SyncEvent, SyncOp } from "@/sync/types";
+import { Sync, SyncOp, SyncEvent, SyncConfig, Handlers } from "@/sync/types";
 
 import { Entity, getEngine, Store } from "@/sync/tooling/persistence/store";
 

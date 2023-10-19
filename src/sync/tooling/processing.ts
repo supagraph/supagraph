@@ -37,6 +37,9 @@ import { getNetworks, getProvider } from "@/sync/tooling/network/providers";
 // Import promise queue handling to process internal promise queues
 import { processPromiseQueue } from "@/sync/tooling/promises";
 
+// Check if the blockTimestamp will trigger a scheduled event
+import { checkSchedule } from "./schedule";
+
 // process an events callback
 export const processCallback = async (
   event: SyncEvent,
@@ -502,14 +505,11 @@ export const processListenerBlock = async (
     engine?.stage?.checkpoint();
   }
 
-  // log that we're syncing the block
+  // log that we're syncing the block (*note that writing to stdout directly will bypass chromes inspector logs)
   if (!silent)
     process.stdout.write(
-      `\n--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})\n`
+      `\n--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})\n\nEvents processed `
     );
-
-  // log that we're starting (*note that writing to stdout directly will bypass chromes inspector logs)
-  if (!silent) process.stdout.write(`\nEvents processed `);
 
   // await obj containing parts (keeping this then unpacking to check .cancelled by ref in async flow)
   const parts = await asyncParts;
@@ -907,6 +907,9 @@ export const processListenerBlock = async (
 
         // finished after updating pointers
         if (!silent) process.stdout.write(`✔\n`);
+
+        // check if this block triggers anything in the schedule - run the schedule after processing the block to make sure we start from a complete state
+        await checkSchedule(block.timestamp);
 
         // always delete the block and receipts from tmp storage - we'll never use it again
         await deleteJSON(

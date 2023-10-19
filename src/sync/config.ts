@@ -11,7 +11,7 @@ import { getEngine, Store } from "@/sync/tooling/persistence/store";
 import { getNewSyncEvents } from "@/sync/tooling/network/events";
 import { getProvider } from "@/sync/tooling/network/providers";
 
-import { Sync, HandlerFn, SyncConfig, Handlers } from "./types";
+import { Sync, HandlerFn, SyncConfig, Handlers, CronSchedule } from "./types";
 
 // sync operations will be appended in the route.ts file using addSync
 export const syncs: Sync[] = [];
@@ -378,4 +378,22 @@ export const sortSyncs = (against?: Sync[]) => {
     // process lower chainIds first
     return a.chainId - b.chainId;
   });
+};
+
+// set the cron schedule to fire timebound events as we process blocks...
+export const setSchedule = async (
+  schedule: CronSchedule[],
+  against?: CronSchedule[]
+) => {
+  // get engine to place the schedule
+  const engine = await getEngine();
+
+  // default cronSchedule and conbine with provided values
+  engine.cronSchedule =
+    against || engine.cronSchedule
+      ? [...(against || engine.cronSchedule), ...(schedule || [])]
+      : [...(schedule || [])];
+
+  // return the schedule
+  return engine.cronSchedule;
 };

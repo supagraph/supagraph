@@ -6,6 +6,7 @@ import {
   SyncStage,
   SyncConfig,
   SyncResponse,
+  CronSchedule,
 } from "@/sync/types";
 
 // Create new entities against the engine via the Store
@@ -28,7 +29,7 @@ import {
 } from "@/sync/tooling";
 
 // Import sortSyncs method from config
-import { sortSyncs } from "@/sync/config";
+import { setSchedule, sortSyncs } from "@/sync/config";
 
 // Export multicall contract factory and call wrapper
 export {
@@ -80,6 +81,7 @@ export const sync = async ({
   config = undefined,
   handlers = undefined,
   migrations = undefined,
+  schedule = undefined,
   start = false,
   stop = false,
   collectBlocks = false,
@@ -100,6 +102,8 @@ export const sync = async ({
   handlers?: Handlers;
   // allow migrations to be injected at blockHeights
   migrations?: Migration[];
+  // a map of cron jobs to run as we ingest blocks (in listen mode)
+  schedule?: CronSchedule[];
   // globally include all blocks/txReceipts for all handlers
   collectBlocks?: boolean;
   collectTxReceipts?: boolean;
@@ -138,6 +142,8 @@ export const sync = async ({
   engine.eventIfaces = engine.eventIfaces ?? {};
   // default providers
   engine.providers = engine.providers ?? {};
+  // default cronSchedule and conbine with provided values
+  engine.cronSchedule = await setSchedule(schedule ?? []);
   // pointer to the meta document containing current set of syncs
   engine.syncOps = await restoreSyncOps(config, handlers);
   // sort the syncs - this is what we're searching for in this run and future "listens"
@@ -322,44 +328,50 @@ export const sync = async ({
 
     // place in the microtask queue to open listeners after we return the sync summary and close fn
     if (listen) {
-      // attach close mech to engine
-      engine.close = async () => listeners[1]();
-      // print that we're opening the listeners
-      if (!silent) console.log("\n===\n\nProcessing listeners...");
-      // open the listener queue for resolution
-      controls.inSync = true;
-      // restart processing
-      const restartProcessing = async (
-        reattach: () => Promise<false | void>
-      ) => {
-        // return the block processing chain
-        return new Promise<void>((resolve) => {
-          setImmediate(() => {
-            attachBlockProcessing(controls, errorHandler).then(() => resolve());
-          });
-        }).then(reattach);
-      };
-      // attach processing with an async promise queue which restarts when it empties
-      attachBlockProcessing(controls, errorHandler).then(
-        async function reattach() {
-          // if we havent throw an error and exited the process...
-          if (!errorHandler.resolved) {
-            // start listening again
-            controls.suspended = false;
-            // run garbage collection now whilst the queue is clear of any pending
-            if (global.gc && typeof global.gc === "function") {
-              // print the gc run
-              if (!silent) process.stdout.write("\n--\n\nRunning gc now...\n");
-              // this will halt all execution until it completes
-              global.gc();
+      // after returning
+      setImmediate(() => {
+        // attach close mech to engine
+        engine.close = async () => listeners[1]();
+        // print that we're opening the listeners
+        if (!silent) console.log("\n===\n\nProcessing listeners...");
+        // open the listener queue for resolution
+        controls.inSync = true;
+        // restart processing
+        const restartProcessing = async (
+          reattach: () => Promise<false | void>
+        ) => {
+          // return the block processing chain
+          return new Promise<void>((resolve) => {
+            setImmediate(() => {
+              attachBlockProcessing(controls, errorHandler).then(() =>
+                resolve()
+              );
+            });
+          }).then(reattach);
+        };
+        // attach processing with an async promise queue which restarts when it empties
+        attachBlockProcessing(controls, errorHandler).then(
+          async function reattach() {
+            // if we havent throw an error and exited the process...
+            if (!errorHandler.resolved && engine.syncing) {
+              // start listening again
+              controls.suspended = false;
+              // run garbage collection now whilst the queue is clear of any pending
+              if (global.gc && typeof global.gc === "function") {
+                // print the gc run
+                if (!silent)
+                  process.stdout.write("\n--\n\nRunning gc now...\n");
+                // this will halt all execution until it completes
+                global.gc();
+              }
+              // keep reattaching on close until the error handler resolves
+              return restartProcessing(reattach);
             }
-            // keep reattaching on close until the error handler resolves
-            return restartProcessing(reattach);
+            // end when errorHandler is resolved
+            return false;
           }
-          // end when errorHandler is resolved
-          return false;
-        }
-      );
+        );
+      });
     } else {
       // set syncing to false
       engine.syncing = false;
@@ -394,7 +406,7 @@ export const sync = async ({
       ),
       ...((listen && {
         // if we're attached in listen mode, return a method to close the listeners (all reduced into one call)
-        close: async () => listeners[0](),
+        close: async () => listeners[1](),
       }) ||
         {}),
     } as SyncResponse;

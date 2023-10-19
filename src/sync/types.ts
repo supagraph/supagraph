@@ -55,6 +55,7 @@ export type Engine = {
     | Promise<unknown>
     | ((stack?: (() => Promise<any>)[]) => Promise<unknown>)
   )[];
+  cronSchedule?: CronSchedule[];
   providers?: Record<number, Record<number, providers.JsonRpcProvider>>;
   extraProviders?: string[];
   eventAbis?: Record<string, ethers.Contract["abi"]>;
@@ -91,6 +92,13 @@ export type Engine = {
   currentProcess?: Promise<void>;
   close?: (() => Promise<void>) | undefined;
   appendEvents?: (events: SyncEvent[], silent?: boolean) => Promise<void>;
+};
+
+// run events against a cron schedule
+export type CronSchedule = {
+  expr: string;
+  lastRun: number;
+  handler: () => Promise<void>;
 };
 
 // Defines a migration handler
