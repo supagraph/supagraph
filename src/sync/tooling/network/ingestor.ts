@@ -260,19 +260,72 @@ export class Ingestor {
     // ensure the buffer exists for the given chain
     if (!this.blockBuffers[chainId]) this.blockBuffers[chainId] = {};
 
-    // fetch and append receipts for each transaction in the block (this will block thread until all transactions are resolved)
-    // wonder if we should timeout this op - we would need to clear from queues and buffer
-    const blockAndReceipts = await this.fetchAndAppendReceipts(block, chainId);
+    // if this rejects we will restack the block and try again
+    return new Promise<void>((resolve, reject) => {
+      // mark as cancelled on timeout
+      const controls: { cancelled: boolean } = { cancelled: false };
+      // try to resolve for 10seconds
+      const timeout = setTimeout(() => {
+        // clean up tx queues
+        block.transactions.forEach((tx) => {
+          // delete all from outgoing
+          const outgoingDelIndex = this.outgoingTransactionQueue.findIndex(
+            (queueTx) =>
+              queueTx &&
+              (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
+          );
+          if (outgoingDelIndex !== -1)
+            delete this.outgoingTransactionQueue[outgoingDelIndex];
+          // delete all from incoming
+          const incomingDelIndex = this.incomingTransactionQueue.findIndex(
+            (queueTx) =>
+              queueTx &&
+              (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
+          );
+          if (incomingDelIndex !== -1)
+            delete this.incomingTransactionQueue[incomingDelIndex];
+          // delete from the buffer incase of bogus response
+          delete this.transactionBuffers[chainId][
+            typeof tx === "string" ? tx : tx.hash
+          ];
+        });
+        // mark as cancelled
+        controls.cancelled = true;
+        // timeout the request
+        reject(new Error("Timeout"));
+      }, 30e3);
 
-    // place the block into the buffer
-    this.blockBuffers[chainId][+block.number] = {
-      ...blockAndReceipts,
-      number: +block.number,
-      chainId,
-    };
+      // fetch and append receipts for each transaction in the block (this will block thread until all transactions are resolved)
+      this.fetchAndAppendReceipts(block, chainId, controls)
+        .then(
+          // with block and receipt...
+          (blockAndReceipts) => {
+            if (blockAndReceipts) {
+              // place the block into the buffer
+              this.blockBuffers[chainId][+block.number] = {
+                ...blockAndReceipts,
+                number: +block.number,
+                chainId,
+              };
 
-    // buffer operation will always write a single block to the saveStream (eventually)
-    this.processBuffer();
+              // buffer operation will always write a single block to the saveStream (eventually)
+              this.processBuffer();
+
+              // void resolve after buffering
+              resolve();
+            } else {
+              // make sure everything has resolved
+              reject(new Error("Missing details"));
+            }
+          }
+        )
+        .catch((e) => {
+          reject(e);
+        })
+        .finally(() => {
+          clearTimeout(timeout);
+        });
+    });
   }
 
   // Logic to process blocks in the buffer
@@ -329,7 +382,10 @@ export class Ingestor {
   // fetch the receipts and return them along with the block
   private async fetchAndAppendReceipts(
     block: BlockData,
-    chainId: number
+    chainId: number,
+    controls: {
+      cancelled: boolean;
+    }
   ): Promise<{ block: BlockData; receipts: TxData[] }> {
     try {
       if (
@@ -367,6 +423,9 @@ export class Ingestor {
         // throw to wait 1 seconds
         throw new Error("We need to wait for the transactions to be processed");
       } else {
+        // if we cancel this on the outside propagate through
+        if (controls.cancelled) throw new Error("Cancelled after timeout");
+
         // attempt to collect all receipts
         const receipts = await Promise.all(
           block.transactions
@@ -385,6 +444,9 @@ export class Ingestor {
           // throw in context
           throw e;
         });
+
+        // if we cancel this on the outside propagate through
+        if (controls.cancelled) throw new Error("Cancelled after timeout");
 
         // iterate and delete from buffer
         block.transactions.forEach((tx) => {
@@ -422,7 +484,7 @@ export class Ingestor {
           setTimeout(() => {
             try {
               // attempt to resolve the fetch again
-              resolve(this.fetchAndAppendReceipts(block, chainId));
+              resolve(this.fetchAndAppendReceipts(block, chainId, controls));
             } catch (err) {
               // any hard rejections should carry to outer promise
               reject(err);
