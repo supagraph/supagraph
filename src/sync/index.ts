@@ -92,6 +92,9 @@ export const sync = async ({
   cleanup = false,
   silent = false,
   readOnly = false,
+  numBlockWorkers = undefined,
+  numTransactionWorkers = undefined,
+  printIngestionErrors = false,
   onError = async (_, reset) => {
     // reset the locks by default
     await reset();
@@ -112,6 +115,12 @@ export const sync = async ({
   cleanup?: boolean;
   silent?: boolean;
   readOnly?: boolean;
+  // the number of block workers to use for processing (sets concurrency for ingestor block processing)
+  numBlockWorkers?: number;
+  // the number of transaction workers to use for processing (sets concurrency for ingestor transaction processing)
+  numTransactionWorkers?: number;
+  // should we print errors that the ingestor encounters?
+  printIngestionErrors?: boolean;
   // position which stage we should start and stop the sync
   start?: keyof typeof SyncStage | false;
   stop?: keyof typeof SyncStage | false;
@@ -225,7 +234,11 @@ export const sync = async ({
     // event listener will see all blocks and transactions passing everything to appropriate handlers in block/tx/log order (grouped by type)
     if (listen) {
       // get all chainIds for defined networks
-      ingestor = await createIngestor();
+      ingestor = await createIngestor(
+        numBlockWorkers,
+        numTransactionWorkers,
+        printIngestionErrors
+      );
       // start workers to begin processing blocks
       await ingestor.startWorkers();
       // attach listeners to send blocks to the ingestor
@@ -249,10 +262,7 @@ export const sync = async ({
       cleanup,
       start,
       silent
-    ).catch((e) => {
-      // throw in outer context
-      throw e;
-    });
+    );
 
     // apply any migrations that fit the event range
     await applyMigrations(migrations, config, events);
@@ -327,13 +337,13 @@ export const sync = async ({
         ).toPrecision(4)}s\n\n`
       );
 
-    // place in the microtask queue to open listeners after we return the sync summary and close fn
-    if (listen) {
+    // if enabled, place in the microtask queue to open listeners after we return the sync summary and close/exit fn
+    if (!listen) {
+      // set syncing to false - we never opened the listeners
+      engine.syncing = false;
+    } else {
       // set the processing mechanism going by switching active file to trigger line reader
       setImmediate(() => ingestor.startProcessing());
-    } else {
-      // set syncing to false
-      engine.syncing = false;
     }
 
     // return a summary of the operation to the caller (and the close() fn if we called sync({...}) with listen: true)
@@ -370,7 +380,7 @@ export const sync = async ({
         {}),
       ...((listen && {
         // if we're attached in listen mode, return a method to close the listeners (all reduced into one call)
-        throw: async () => listeners[1](),
+        exit: async () => listeners[1](),
       }) ||
         {}),
     } as SyncResponse;

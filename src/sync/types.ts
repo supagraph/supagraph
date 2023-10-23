@@ -1,7 +1,6 @@
 // Import required types from ethers
 import type {
   Block,
-  BlockWithTransactions,
   TransactionReceipt,
   TransactionResponse,
 } from "@ethersproject/abstract-provider";
@@ -174,6 +173,7 @@ export type SyncResponse = {
   startBlocksByChain?: Record<number, number>;
   latestBlocksByChain?: Record<number, number>;
   close?: (() => Promise<void>) | undefined;
+  exit?: (() => Promise<void>) | undefined;
 };
 
 // Export the complete supagraph configuration (sync & graph) - we can add everything from Mappings to this config
@@ -192,6 +192,12 @@ export type SyncConfig = {
   silent?: boolean;
   // set readOnly on the engine via config
   readOnly?: boolean;
+  // the number of block workers to use for processing (sets concurrency for ingestor block processing)
+  numBlockWorkers?: number;
+  // the number of transaction workers to use for processing (sets concurrency for ingestor transaction processing)
+  numTransactionWorkers?: number;
+  // should we print errors that the ingestor encounters?
+  printIngestionErrors?: boolean;
   // how many rpc reqs/promises to attempt concurrently
   concurrency?: number;
   // global tx/block capture
@@ -292,10 +298,3 @@ export type LatestEntity = Record<
     _block_ts: number;
   }
 >;
-
-// Block listener helper
-export type AsyncBlockParts = {
-  cancelled?: boolean;
-  block: BlockWithTransactions;
-  receipts: Record<string, TransactionReceipt>;
-};

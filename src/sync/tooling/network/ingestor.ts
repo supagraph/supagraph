@@ -752,7 +752,11 @@ async function fetchDataWithRetries<T>(
 }
 
 // Construct an ingestor to process blocks as they arrive
-export async function createIngestor() {
+export async function createIngestor(
+  numBlockWorkers: number,
+  numTransactionWorkers: number,
+  printIngestorErrors: boolean = false
+) {
   // get the engine
   const engine = await getEngine();
   // get all chainIds for defined networks
@@ -801,8 +805,11 @@ export async function createIngestor() {
       rpcUrls[chainId] = syncProviders[chainId].connection.url;
       return rpcUrls;
     }, {}),
-    // skip swap heap dumps and error logs
-    silent: true,
+    // pass through workers config
+    numBlockWorkers,
+    numTransactionWorkers,
+    // should we skip reporting on swap heap dumps and ingestion error logs?
+    silent: !printIngestorErrors,
   });
 }
 
