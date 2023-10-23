@@ -64,6 +64,30 @@ export const setEngine = async ({
   return engine;
 };
 
+// override the default engine
+export const resetEngine = async ({
+  name,
+  db,
+}: {
+  name: string;
+  db: DB | Promise<DB>;
+}) => {
+  // clear the engine stored in the global engine and setEngine again
+  (global as typeof global & { engine: Engine }).engine = (
+    global as typeof global & { engine: Engine }
+  ).engine || {
+    events: [],
+    block: {},
+    opSyncs: {},
+    callbacks: {},
+    eventAbis: {},
+    eventIfaces: {},
+    startBlocks: {},
+  };
+
+  return setEngine({ name, db });
+};
+
 // Each distinct kv entity - exposed via Store.get<T> - fully typed according to T
 export class Entity<T extends { id: string }> extends TypedMap<
   keyof T,

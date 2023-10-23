@@ -22,11 +22,7 @@ import {
   releaseSyncPointerLocks,
   updateSyncsOpsMeta,
 } from "@/sync/tooling/persistence/meta";
-import {
-  deleteJSON,
-  doCleanup,
-  readJSON,
-} from "@/sync/tooling/persistence/disk";
+import { doCleanup, readJSON } from "@/sync/tooling/persistence/disk";
 
 // Import types used in the process
 import { SyncStage, SyncEvent, Migration, Sync } from "@/sync/types";
@@ -910,19 +906,6 @@ export const processListenerBlock = async (
 
         // check if this block triggers anything in the schedule - run the schedule after processing the block to make sure we start from a complete state
         await checkSchedule(block.timestamp);
-
-        // always delete the block and receipts from tmp storage - we'll never use it again
-        await deleteJSON(
-          "blockAndReceipts",
-          `${chainId}-${+block.number}`
-        ).catch(() => {
-          // print/noop error
-          if (!engine.flags.silent)
-            console.log(
-              "Error: problems deleting file",
-              `${chainId}-${+block.number}`
-            );
-        });
       }
     }
   }

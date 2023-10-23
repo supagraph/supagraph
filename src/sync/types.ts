@@ -84,12 +84,10 @@ export type Engine = {
     collectBlocks?: boolean;
     collectTxReceipts?: boolean;
     listen?: boolean;
-    multithread?: boolean;
     cleanup?: boolean;
     silent?: boolean;
-    noop?: boolean;
   };
-  currentProcess?: Promise<void>;
+  exit?: (() => Promise<void>) | undefined;
   close?: (() => Promise<void>) | undefined;
   appendEvents?: (events: SyncEvent[], silent?: boolean) => Promise<void>;
 };
@@ -97,7 +95,7 @@ export type Engine = {
 // run events against a cron schedule
 export type CronSchedule = {
   expr: string;
-  lastRun: number;
+  lastRun?: number;
   handler: () => Promise<void>;
 };
 
@@ -188,14 +186,10 @@ export type SyncConfig = {
   reset?: boolean;
   // boolean to start the listening service to keep the chain insync
   listen?: boolean;
-  // run listen-modes block collection by spawning child_processes to handle network and disk ops
-  multithread?: boolean;
   // clean up initial sync tmp files
   cleanup?: boolean;
   // optionally silence std-out until error
   silent?: boolean;
-  // disable block processing (ingestor only mode)
-  noop?: boolean;
   // set readOnly on the engine via config
   readOnly?: boolean;
   // how many rpc reqs/promises to attempt concurrently

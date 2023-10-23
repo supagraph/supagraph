@@ -87,7 +87,7 @@ devDependencies:
     version: registry.npmjs.org/eslint-config-prettier@8.5.0(eslint@7.32.0)
   eslint-config-turbo:
     specifier: latest
-    version: registry.npmjs.org/eslint-config-turbo@1.10.15(eslint@7.32.0)
+    version: registry.npmjs.org/eslint-config-turbo@1.10.16(eslint@7.32.0)
   eslint-import-resolver-typescript:
     specifier: ^3.5.2
     version: registry.npmjs.org/eslint-import-resolver-typescript@3.5.2(eslint-plugin-import@2.26.0)(eslint@7.32.0)
@@ -3030,16 +3030,16 @@ packages:
       eslint: registry.npmjs.org/eslint@7.32.0
     dev: true
 
-  registry.npmjs.org/eslint-config-turbo@1.10.15(eslint@7.32.0):
-    resolution: {integrity: sha512-76mpx2x818JZE26euen14utYcFDxOahZ9NaWA+6Xa4pY2ezVKVschuOxS96EQz3o3ZRSmcgBOapw/gHbN+EKxQ==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-config-turbo/-/eslint-config-turbo-1.10.15.tgz}
-    id: registry.npmjs.org/eslint-config-turbo/1.10.15
+  registry.npmjs.org/eslint-config-turbo@1.10.16(eslint@7.32.0):
+    resolution: {integrity: sha512-O3NQI72bQHV7FvSC6lWj66EGx8drJJjuT1kuInn6nbMLOHdMBhSUX/8uhTAlHRQdlxZk2j9HtgFCIzSc93w42g==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-config-turbo/-/eslint-config-turbo-1.10.16.tgz}
+    id: registry.npmjs.org/eslint-config-turbo/1.10.16
     name: eslint-config-turbo
-    version: 1.10.15
+    version: 1.10.16
     peerDependencies:
       eslint: '>6.6.0'
     dependencies:
       eslint: registry.npmjs.org/eslint@7.32.0
-      eslint-plugin-turbo: registry.npmjs.org/eslint-plugin-turbo@1.10.15(eslint@7.32.0)
+      eslint-plugin-turbo: registry.npmjs.org/eslint-plugin-turbo@1.10.16(eslint@7.32.0)
     dev: true
 
   registry.npmjs.org/eslint-import-resolver-node@0.3.7:
@@ -3231,11 +3231,11 @@ packages:
       string.prototype.matchall: registry.npmjs.org/string.prototype.matchall@4.0.8
     dev: true
 
-  registry.npmjs.org/eslint-plugin-turbo@1.10.15(eslint@7.32.0):
-    resolution: {integrity: sha512-Tv4QSKV/U56qGcTqS/UgOvb9HcKFmWOQcVh3HEaj7of94lfaENgfrtK48E2CckQf7amhKs1i+imhCsNCKjkQyA==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-plugin-turbo/-/eslint-plugin-turbo-1.10.15.tgz}
-    id: registry.npmjs.org/eslint-plugin-turbo/1.10.15
+  registry.npmjs.org/eslint-plugin-turbo@1.10.16(eslint@7.32.0):
+    resolution: {integrity: sha512-ZjrR88MTN64PNGufSEcM0tf+V1xFYVbeiMeuIqr0aiABGomxFLo4DBkQ7WI4WzkZtWQSIA2sP+yxqSboEfL9MQ==, registry: https://registry.npmjs.com/, tarball: https://registry.npmjs.org/eslint-plugin-turbo/-/eslint-plugin-turbo-1.10.16.tgz}
+    id: registry.npmjs.org/eslint-plugin-turbo/1.10.16
     name: eslint-plugin-turbo
-    version: 1.10.15
+    version: 1.10.16
     peerDependencies:
       eslint: '>6.6.0'
     dependencies:

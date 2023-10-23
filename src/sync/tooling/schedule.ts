@@ -53,8 +53,14 @@ export const checkSchedule = async (blockTimestamp: number) => {
           // open a checkpoint
           engine.stage.checkpoint();
 
-          // run expression according to schedule (blocking)
-          await cronExpression.handler();
+          // attempt the scheduled handler
+          try {
+            // run expression according to schedule (blocking)
+            await cronExpression.handler();
+          } catch (e) {
+            // print error but don't stop
+            console.error(e);
+          }
 
           // flush global promise queue
           await processPromiseQueue(

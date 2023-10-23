@@ -9,12 +9,11 @@ import {
   CronSchedule,
 } from "@/sync/types";
 
-// Create new entities against the engine via the Store
+// Import all tooling to process sync operations
 import {
   getEngine,
   checkLocks,
   promiseQueue,
-  createListeners,
   applyMigrations,
   getNewSyncEvents,
   getNewSyncEventsBlocks,
@@ -25,7 +24,9 @@ import {
   getNetworks,
   restoreSyncOps,
   updateSyncsOpsMeta,
-  attachBlockProcessing,
+  Ingestor,
+  createIngestor,
+  createListeners,
 } from "@/sync/tooling";
 
 // Import sortSyncs method from config
@@ -48,6 +49,7 @@ export {
   Store,
   getEngine,
   setEngine,
+  resetEngine,
 } from "@/sync/tooling/persistence/store";
 
 // Export promise handling
@@ -87,11 +89,9 @@ export const sync = async ({
   collectBlocks = false,
   collectTxReceipts = false,
   listen = false,
-  multithread = false,
   cleanup = false,
   silent = false,
   readOnly = false,
-  noop = false,
   onError = async (_, reset) => {
     // reset the locks by default
     await reset();
@@ -109,11 +109,9 @@ export const sync = async ({
   collectTxReceipts?: boolean;
   // control how we listen, cleanup and log data
   listen?: boolean;
-  multithread?: boolean;
   cleanup?: boolean;
   silent?: boolean;
   readOnly?: boolean;
-  noop?: boolean;
   // position which stage we should start and stop the sync
   start?: keyof typeof SyncStage | false;
   stop?: keyof typeof SyncStage | false;
@@ -152,14 +150,15 @@ export const sync = async ({
   // get all chainIds for defined networks
   const { chainIds } = await getNetworks();
 
+  // associate ingestor when we start listening
+  let ingestor: Ingestor;
+
   // keep track of connected listeners in listen mode
-  const listeners: (() => void)[] = [];
+  let listeners: (() => Promise<void>)[] = [];
 
   // allow options to be set by config instead of by top level if supplied
   listen = config ? config.listen ?? listen : listen;
-  multithread = config ? config.multithread ?? multithread : multithread;
   silent = config ? config.silent ?? silent : silent;
-  noop = config ? config.noop ?? noop : noop;
   cleanup = config ? config.cleanup ?? cleanup : cleanup;
   collectBlocks = config
     ? config.collectBlocks ?? collectBlocks
@@ -171,10 +170,8 @@ export const sync = async ({
   // set the runtime flags into the engine
   engine.flags = {
     listen,
-    multithread,
     cleanup,
     silent,
-    noop,
     start,
     stop,
     collectBlocks,
@@ -227,9 +224,13 @@ export const sync = async ({
 
     // event listener will see all blocks and transactions passing everything to appropriate handlers in block/tx/log order (grouped by type)
     if (listen) {
-      // create the listener set for the syncOps
-      await createListeners(
-        listeners,
+      // get all chainIds for defined networks
+      ingestor = await createIngestor();
+      // start workers to begin processing blocks
+      await ingestor.startWorkers();
+      // attach listeners to send blocks to the ingestor
+      listeners = await createListeners(
+        ingestor,
         controls,
         migrations,
         errorHandler,
@@ -328,50 +329,8 @@ export const sync = async ({
 
     // place in the microtask queue to open listeners after we return the sync summary and close fn
     if (listen) {
-      // after returning
-      setImmediate(() => {
-        // attach close mech to engine
-        engine.close = async () => listeners[1]();
-        // print that we're opening the listeners
-        if (!silent) console.log("\n===\n\nProcessing listeners...");
-        // open the listener queue for resolution
-        controls.inSync = true;
-        // restart processing
-        const restartProcessing = async (
-          reattach: () => Promise<false | void>
-        ) => {
-          // return the block processing chain
-          return new Promise<void>((resolve) => {
-            setImmediate(() => {
-              attachBlockProcessing(controls, errorHandler).then(() =>
-                resolve()
-              );
-            });
-          }).then(reattach);
-        };
-        // attach processing with an async promise queue which restarts when it empties
-        attachBlockProcessing(controls, errorHandler).then(
-          async function reattach() {
-            // if we havent throw an error and exited the process...
-            if (!errorHandler.resolved && engine.syncing) {
-              // start listening again
-              controls.suspended = false;
-              // run garbage collection now whilst the queue is clear of any pending
-              if (global.gc && typeof global.gc === "function") {
-                // print the gc run
-                if (!silent)
-                  process.stdout.write("\n--\n\nRunning gc now...\n");
-                // this will halt all execution until it completes
-                global.gc();
-              }
-              // keep reattaching on close until the error handler resolves
-              return restartProcessing(reattach);
-            }
-            // end when errorHandler is resolved
-            return false;
-          }
-        );
-      });
+      // set the processing mechanism going by switching active file to trigger line reader
+      setImmediate(() => ingestor.startProcessing());
     } else {
       // set syncing to false
       engine.syncing = false;
@@ -406,7 +365,12 @@ export const sync = async ({
       ),
       ...((listen && {
         // if we're attached in listen mode, return a method to close the listeners (all reduced into one call)
-        close: async () => listeners[1](),
+        close: async () => listeners[0](),
+      }) ||
+        {}),
+      ...((listen && {
+        // if we're attached in listen mode, return a method to close the listeners (all reduced into one call)
+        throw: async () => listeners[1](),
       }) ||
         {}),
     } as SyncResponse;

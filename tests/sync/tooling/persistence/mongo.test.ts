@@ -27,6 +27,7 @@ describe("Mongo", () => {
 
     mockClient = {
       db: jest.fn(() => mockDb) as MongoClient["db"],
+      connect: jest.fn(() => Promise.resolve(undefined))
     } as unknown as MongoClient;
   });
 
@@ -201,8 +202,11 @@ describe("Mongo", () => {
           },
         },
         {
-          deleteMany: {
+          deleteOne: {
             filter: { id: "id3" },
+            hint: {
+              "_block_ts": -1,
+            }
           },
         },
       ],
