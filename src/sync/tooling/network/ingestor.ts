@@ -1,13 +1,8 @@
 // Using v8 to measure memory usage between swaps
 import * as v8 from "v8";
-// Using fs for file system io
-import * as fs from "fs";
-// Using readline to process blocks line by line
-import * as readline from "readline";
+
 // Using ethers errors in errorHandler to code check error types
 import { errors } from "ethers";
-// Control everything with read and write streams
-import { createWriteStream, createReadStream } from "fs";
 
 // Use global supagraph engine to associate listeners with ingestor
 import { getEngine } from "../persistence/store";
@@ -16,16 +11,6 @@ import { getNetworks } from "./providers";
 // Supagraph typings
 import { Migration, Sync } from "../../types";
 import { processListenerBlock } from "../processing";
-import { cwd } from "../persistence";
-
-// Set append mode on writeable streams
-const writableFlags = {
-  flags: "a",
-};
-// Set the highwatermark to control the streams internal buffer size
-const readableFlags = {
-  highWaterMark: 512,
-};
 
 // Constants used in post requests
 const method = "POST";
@@ -58,17 +43,24 @@ interface LineEntry {
 
 // Class to contain block processing operations
 export class Ingestor {
-  // Name of file1 used for buffering block lines
-  private outputFileName1: string = "ingestor-tmp-1.json";
-
-  // Name of file2 used for buffering block lines
-  private outputFileName2: string = "ingestor-tmp-2.json";
-
   // Object of RPC urls by chainId
   private rpcUrls: Record<number, string> = {};
 
-  // The current write steam
-  private blockSaveStream: fs.WriteStream;
+  // hold an array for temp storage
+  private blockSaveStream1: {
+    block: BlockData;
+    receipts: TxData[];
+    chainId: number;
+    number: number;
+  }[] = [];
+
+  // hold array for double-buffer storage
+  private blockSaveStream2: {
+    block: BlockData;
+    receipts: TxData[];
+    chainId: number;
+    number: number;
+  }[] = [];
 
   // Which of the two output files is currently active (double buffer switch)
   private blockSaveStreamSwitch: boolean = false;
@@ -141,7 +133,6 @@ export class Ingestor {
   // Construct with options...
   constructor({
     withLine,
-    filename = "ingestor-tmp",
     rpcUrls = {},
     silent = false,
     maxRetries = 3,
@@ -149,7 +140,6 @@ export class Ingestor {
     numTransactionWorkers = 22,
   }: {
     withLine: (ingestor: Ingestor, line: LineEntry) => void | Promise<void>;
-    filename?: string;
     rpcUrls?: Record<number, string>;
     silent?: boolean;
     maxRetries?: number;
@@ -158,9 +148,6 @@ export class Ingestor {
   }) {
     // copy user supplied options to context
     this.withLine = withLine;
-    // we're using two files to buffer the responses so we can hot-swap during the write/read cycles
-    this.outputFileName1 = `${filename}-1.json`;
-    this.outputFileName2 = `${filename}-2.json`;
     // extend rpcUrls with user definitions
     this.rpcUrls = { ...this.rpcUrls, ...rpcUrls };
     // record options
@@ -172,21 +159,6 @@ export class Ingestor {
     // initiate the workerPool
     this.blockWorkerPool = new Array(this.numBlockWorkers);
     this.transactionWorkerPool = new Array(this.numTransactionWorkers);
-    // create a writable stream to save block data to a single file
-    this.blockSaveStream = createWriteStream(
-      this.outputFileName1,
-      writableFlags
-    );
-    // check if the output files exist, and if not, create them
-    if (!fs.existsSync(this.outputFileName1)) {
-      fs.writeFileSync(this.outputFileName1, "");
-    }
-    if (!fs.existsSync(this.outputFileName2)) {
-      fs.writeFileSync(this.outputFileName2, "");
-    }
-    // start files clean by truncating all content
-    fs.promises.truncate(this.outputFileName1, 0);
-    fs.promises.truncate(this.outputFileName2, 0);
   }
 
   // Expose the length of the blockQueue
@@ -244,11 +216,6 @@ export class Ingestor {
     await Promise.all(
       this.transactionWorkerPool.map(async (promise) => promise)
     );
-    // close out the saveStream
-    await new Promise<void>((resolve) => {
-      this.blockSaveStream.end(resolve);
-    });
-    this.blockSaveStream.close();
     // switch the active file to the one we've just been using
     this.blockSaveStreamSwitch = !this.blockSaveStreamSwitch;
     // clear the workers pool
@@ -282,11 +249,6 @@ export class Ingestor {
       this.incomingBlockQueue.length = 0;
       this.outgoingBlockQueue.length = 0;
     }
-    // truncate to clear content that was restacked / aborted
-    fs.promises.truncate(
-      this.blockSaveStreamSwitch ? this.outputFileName1 : this.outputFileName2,
-      0
-    );
     // cleanup txQueue, we don't need to reuse anything here
     this.transactionBuffers = {};
     this.incomingTransactionQueue.length = 0;
@@ -335,15 +297,16 @@ export class Ingestor {
   // Logic to write a block to the stream
   private writeBlockToStream(block: Block, blockData: LineEntry) {
     setImmediate(() => {
-      // write to the save stream
-      this.blockSaveStream.write(
-        `${JSON.stringify({
-          number: block.number,
-          chainId: block.chainId,
-          block: blockData.block,
-          receipts: blockData.receipts,
-        })}\n`
-      );
+      // pushh to the active blockStream
+      (this.blockSaveStreamSwitch
+        ? this.blockSaveStream1
+        : this.blockSaveStream2
+      ).push({
+        number: block.number,
+        chainId: block.chainId,
+        block: blockData.block,
+        receipts: blockData.receipts,
+      });
       // incr the pending line count (decr when we read it)
       this.pendingBlockCount += 1;
       // delete the buffered entry for gc to collect
@@ -430,7 +393,7 @@ export class Ingestor {
             const delIndex = this.outgoingTransactionQueue.findIndex(
               (queueTx) =>
                 queueTx &&
-                (typeof tx === "string" ? tx : tx.hash === queueTx.hash)
+                (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
             );
             // delete from the buffer
             delete this.transactionBuffers[chainId][
@@ -449,10 +412,44 @@ export class Ingestor {
       }
     } catch (e) {
       // check again in 1s - all transactions must eventually resolve
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          resolve(this.fetchAndAppendReceipts(block, chainId));
-        }, 1e3);
+      return new Promise((resolve, reject) => {
+        // if we're waiting on resolution try again, else throw
+        if (
+          e.toString() ===
+          "Error: We need to wait for the transactions to be processed"
+        ) {
+          setTimeout(async () => {
+            try {
+              // attempt to resolve the fetch again
+              resolve(await this.fetchAndAppendReceipts(block, chainId));
+            } catch (err) {
+              // any hard rejections should carry to outer promise
+              reject(err);
+            }
+          }, 1e3);
+        } else {
+          // clear all tx's from queues
+          block.transactions.forEach((tx) => {
+            // delete all from outgoing
+            const outgoingDelIndex = this.outgoingTransactionQueue.findIndex(
+              (queueTx) =>
+                queueTx &&
+                (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
+            );
+            if (outgoingDelIndex !== -1)
+              delete this.outgoingTransactionQueue[outgoingDelIndex];
+            // delete all from incoming
+            const incomingDelIndex = this.incomingTransactionQueue.findIndex(
+              (queueTx) =>
+                queueTx &&
+                (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
+            );
+            if (incomingDelIndex !== -1)
+              delete this.incomingTransactionQueue[incomingDelIndex];
+          });
+          // throw in outer context to throw the block fetch (will throw parent to throw parent etc...)
+          reject(e);
+        }
       });
     }
   }
@@ -585,28 +582,11 @@ export class Ingestor {
     if (!this.halted) {
       // if blocks have been added to the inactive file, switch and read (else just timeout for another second)
       if (this.pendingBlockCount > 0) {
-        // record the oldStream so that it can be closed after the switch
-        const oldStream = this.blockSaveStream;
-
         // mark that we've entered swapping mode (temp lock)
         this.swapping = true;
 
-        // switch out the active file so we can drain its content safely
-        this.blockSaveStream = createWriteStream(
-          this.blockSaveStreamSwitch
-            ? this.outputFileName1
-            : this.outputFileName2,
-          writableFlags
-        );
-
         // mark the switch
         this.blockSaveStreamSwitch = !this.blockSaveStreamSwitch;
-
-        // close the old stream
-        await new Promise<void>((resolve) => {
-          oldStream.end(resolve);
-        });
-        oldStream.close();
 
         // mark end of swapping mode
         this.swapping = false;
@@ -625,25 +605,18 @@ export class Ingestor {
     withLine: (ingestor: Ingestor, line: LineEntry) => void | Promise<void>
   ) {
     // blockSaveStreamSwitch switched just before we entered this function, we want to read the opposite file to the saveStream
-    const previousOutput = this.blockSaveStreamSwitch
-      ? this.outputFileName1
-      : this.outputFileName2;
+    const previousReadArray = this.blockSaveStreamSwitch
+      ? this.blockSaveStream2
+      : this.blockSaveStream1;
 
-    // create a readStream to grab the content to be processed from the inactive file
-    const previousReadStream = createReadStream(previousOutput, readableFlags);
-
-    // open an interface to read the lines
-    const rl = readline.createInterface({
-      input: previousReadStream,
-      output: process.stdout,
-      terminal: false,
-    });
-
-    // process them line-by-line
-    for await (const line of rl) {
+    // for await (const line of previousReadArray) {
+    while (previousReadArray.length > 0) {
+      // shift the line and process
+      const line = previousReadArray.shift();
+      // process the line
       try {
         // attempt the provided withLine call
-        await withLine(this, JSON.parse(line));
+        await withLine(this, line);
       } catch (e) {
         // log errors but dont stop
         if (!this.silent) console.error(e);
@@ -653,20 +626,8 @@ export class Ingestor {
       }
     }
 
-    // close the read stream and truncate the inactive files content
-    try {
-      // close the readline interface
-      rl.close();
-      // close the readable stream
-      await new Promise<void>((resolve, reject) => {
-        previousReadStream.close((err) => (!err ? resolve() : reject(err)));
-      });
-    } finally {
-      // truncate the file
-      await fs.promises.truncate(previousOutput, 0);
-      // print heapdump and trigger gc
-      this.v8Print("Swap file heap dump");
-    }
+    // print heapdump and trigger gc
+    this.v8Print("Swap file heap dump");
   }
 
   // Print a heap dump if gc is enabled for manual management
@@ -764,8 +725,6 @@ export async function createIngestor(
 
   // return the new ingestor
   return new Ingestor({
-    // use cwd to place in tmp/local dir
-    filename: `${cwd}ingestor-tmp`,
     // place a withLine function to trigger processing
     withLine: async (ingestor, line) => {
       // attempt to process the block
