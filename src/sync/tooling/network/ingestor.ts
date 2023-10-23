@@ -261,6 +261,7 @@ export class Ingestor {
     if (!this.blockBuffers[chainId]) this.blockBuffers[chainId] = {};
 
     // fetch and append receipts for each transaction in the block (this will block thread until all transactions are resolved)
+    // wonder if we should timeout this op - we would need to clear from queues and buffer
     const blockAndReceipts = await this.fetchAndAppendReceipts(block, chainId);
 
     // place the block into the buffer
@@ -418,10 +419,10 @@ export class Ingestor {
           e.toString() ===
           "Error: We need to wait for the transactions to be processed"
         ) {
-          setTimeout(async () => {
+          setTimeout(() => {
             try {
               // attempt to resolve the fetch again
-              resolve(await this.fetchAndAppendReceipts(block, chainId));
+              resolve(this.fetchAndAppendReceipts(block, chainId));
             } catch (err) {
               // any hard rejections should carry to outer promise
               reject(err);
@@ -446,6 +447,10 @@ export class Ingestor {
             );
             if (incomingDelIndex !== -1)
               delete this.incomingTransactionQueue[incomingDelIndex];
+            // delete from the buffer incase of bogus response
+            delete this.transactionBuffers[chainId][
+              typeof tx === "string" ? tx : tx.hash
+            ];
           });
           // throw in outer context to throw the block fetch (will throw parent to throw parent etc...)
           reject(e);
