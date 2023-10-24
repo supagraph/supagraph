@@ -27,6 +27,9 @@ import { doCleanup, readJSON } from "@/sync/tooling/persistence/disk";
 // Import types used in the process
 import { SyncStage, SyncEvent, Migration, Sync } from "@/sync/types";
 
+// Cast entry.data to ethers.Event
+import { toEventData } from "@/utils/toEventData";
+
 // Import provider tooling to gather current network/providers
 import { getNetworks, getProvider } from "@/sync/tooling/network/providers";
 
@@ -39,7 +42,7 @@ import { checkSchedule } from "./schedule";
 // process an events callback
 export const processCallback = async (
   event: SyncEvent,
-  parts: {
+  blockParts: {
     cancelled?: boolean;
     block: BlockWithTransactions & any;
     receipts: Record<string, TransactionReceipt>;
@@ -50,56 +53,60 @@ export const processCallback = async (
   const engine = await getEngine();
 
   // ensure we havent cancelled the operation...
-  if (!parts.cancelled) {
+  if (!blockParts.cancelled) {
+    // cast to eventData once for valid log style events
+    const eventData = toEventData(event.data);
+
     // get an interface to parse the args
     const iface =
       engine.eventIfaces[
         `${
-          (event.data.address &&
-            `${event.chainId.toString()}-${getAddress(event.data.address)}`) ||
+          (eventData.address &&
+            `${event.chainId.toString()}-${getAddress(eventData.address)}`) ||
           event.chainId
         }-${event.type}`
       ];
-    // make sure we've correctly discovered an iface
+
+    // make sure we've correctly discovered an events iface
     if (iface) {
-      // extract the args
+      // extract the args by using the iface to parse event topics & data
       const { args } =
         typeof event.args === "object"
           ? event
           : iface.parseLog({
-              topics: event.data.topics,
-              data: event.data.data,
+              topics: eventData.topics,
+              data: eventData.data,
             });
-      // transactions can be skipped if we don't need the details in our sync handlers
+      // transactions can be simplified if we don't need the details in our sync handlers
       const tx =
         event.tx ||
         (!engine.flags.collectTxReceipts && !event.collectTxReceipt
           ? ({
-              contractAddress: event.data.address,
-              transactionHash: event.data.transactionHash,
-              transactionIndex: event.data.transactionIndex,
-              blockHash: event.data.blockHash,
-              blockNumber: event.data.blockNumber,
+              contractAddress: eventData.address,
+              transactionHash: eventData.transactionHash,
+              transactionIndex: eventData.transactionIndex,
+              blockHash: eventData.blockHash,
+              blockNumber: eventData.blockNumber,
             } as unknown as TransactionReceipt)
           : await readJSON<TransactionReceipt>(
               "transactions",
-              `${event.chainId}-${event.data.transactionHash}`
+              `${event.chainId}-${eventData.transactionHash}`
             ));
 
-      // block can also be summised from event if were not collecting blocks for this run
+      // block can also be inferred from event if were not collecting blocks for this run
       const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
+        (blockParts.block &&
+          +event.blockNumber === +blockParts.block.number &&
+          blockParts.block) ||
         (!engine.flags.collectBlocks && !event.collectBlock
           ? ({
-              hash: event.data.blockHash,
-              number: event.data.blockNumber,
-              timestamp: event.timestamp || event.data.blockNumber,
+              hash: eventData.blockHash,
+              number: eventData.blockNumber,
+              timestamp: event.timestamp || eventData.blockNumber,
             } as unknown as Block)
           : await readJSON<Block>(
               "blocks",
-              `${event.chainId}-${+event.data.blockNumber}`
+              `${event.chainId}-${+eventData.blockNumber}`
             ));
 
       // set the chainId into the engine - this prepares the Store so that any new entities are constructed against these details
@@ -130,15 +137,15 @@ export const processCallback = async (
               ],
             }
           : ({
-              timestamp: event.timestamp || event.data.blockNumber,
-              number: event.data.blockNumber,
+              timestamp: event.timestamp || eventData.blockNumber,
+              number: eventData.blockNumber,
             } as Block)
       );
 
       // index for the callback and opSync entry
       const cbIndex = `${
-        (event.data.address &&
-          `${event.chainId}-${getAddress(event.data.address)}`) ||
+        (eventData.address &&
+          `${event.chainId}-${getAddress(eventData.address)}`) ||
         event.chainId
       }-${event.type}`;
 
@@ -158,7 +165,7 @@ export const processCallback = async (
           {
             tx: tx as TransactionReceipt & TransactionResponse,
             block,
-            logIndex: event.data.logIndex,
+            logIndex: eventData.logIndex,
           }
         );
         // processed given event
@@ -167,9 +174,9 @@ export const processCallback = async (
     } else if (event.type === "migration") {
       // get block from tmp storage
       const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
+        (blockParts.block &&
+          +event.blockNumber === +blockParts.block.number &&
+          blockParts.block) ||
         (await readJSON<Block>(
           "blocks",
           `${event.chainId}-${+event.blockNumber}`
@@ -215,9 +222,9 @@ export const processCallback = async (
     } else if (event.type === "onBlock") {
       // get block from tmp storage
       const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
+        (blockParts.block &&
+          +event.blockNumber === +blockParts.block.number &&
+          blockParts.block) ||
         (await readJSON<Block>(
           "blocks",
           `${event.chainId}-${+event.blockNumber}`
@@ -268,9 +275,9 @@ export const processCallback = async (
         ));
       // get the tx and block from tmp storage
       const block =
-        (parts.block &&
-          +event.blockNumber === +parts.block.number &&
-          parts.block) ||
+        (blockParts.block &&
+          +event.blockNumber === +blockParts.block.number &&
+          blockParts.block) ||
         (await readJSON<Block>(
           "blocks",
           `${event.chainId}-${+event.blockNumber}`
@@ -301,13 +308,7 @@ export const processCallback = async (
         ],
       });
       // await the response of the handler before moving to the next operation in the sorted ops
-      await engine.callbacks[
-        `${
-          (event.data.address &&
-            `${event.chainId}-${getAddress(event.data.address)}`) ||
-          event.chainId
-        }-${event.type}`
-      ]?.(
+      await engine.callbacks[`${event.chainId}-${event.type}`]?.(
         // pass the parsed args construct
         [],
         // read tx and block from file (this avoids filling the memory with blocks/txs as we collect them - in prod we store into /tmp/)
@@ -464,11 +465,11 @@ export const processListenerBlock = async (
   queueLength: number,
   migrations: Record<string, Migration[]>,
   migrationEntities: Record<string, Record<number, Promise<{ id: string }[]>>>,
-  asyncParts: Promise<{
+  blockParts: {
     cancelled?: boolean;
     block: BlockWithTransactions & any;
     receipts: Record<string, TransactionReceipt>;
-  }>
+  }
 ) => {
   // open a checkpoint on the db...
   const engine = await getEngine();
@@ -501,17 +502,14 @@ export const processListenerBlock = async (
     engine?.stage?.checkpoint();
   }
 
-  // log that we're syncing the block (*note that writing to stdout directly will bypass chromes inspector logs)
+  // log that we're syncing the block (*note that writing to stdout directly will bypass chromes inspector logs but will avoid risk of console.log leaking)
   if (!silent)
     process.stdout.write(
       `\n--\n\nSyncing block ${number} (${queueLength} in queue) from ${syncProviders[chainId].network.name} (chainId: ${chainId})\n\nEvents processed `
     );
 
-  // await obj containing parts (keeping this then unpacking to check .cancelled by ref in async flow)
-  const parts = await asyncParts;
-
-  // unpack the async parts  - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we dont need to do this unless collectTxReceipts is true)
-  const { block, receipts, cancelled } = parts || {};
+  // unpack the async parts  - we need the receipts to access the logBlooms (if we're only doing onBlock/onTransaction we won't use the content unless collectTxReceipts is true)
+  const { block, receipts, cancelled } = blockParts || {};
 
   // check that we havent cancelled this operation
   if (!cancelled && block && receipts) {
@@ -533,7 +531,7 @@ export const processListenerBlock = async (
       baseFeePerGas: block.baseFeePerGas,
       transactions: [
         ...block.transactions.map((tx: { hash: any }) => {
-          // take a copy of each tx to drop assoc
+          // take a copy of each tx to drop assoc to global mem block
           return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
         }),
       ],
@@ -583,7 +581,7 @@ export const processListenerBlock = async (
               eventName: "migration",
               args: [],
               tx: {} as TransactionReceipt & TransactionResponse,
-              // onBlock first
+              // onMigration first
               txIndex: -2,
               logIndex: -2,
             });
@@ -608,7 +606,7 @@ export const processListenerBlock = async (
             eventName: "migration",
             args: [],
             tx: {} as TransactionReceipt & TransactionResponse,
-            // onBlock first
+            // onMigration first
             txIndex: -2,
             logIndex: -2,
           });
@@ -641,9 +639,9 @@ export const processListenerBlock = async (
             eventName: op.eventName,
             args: [],
             tx: {} as TransactionReceipt & TransactionResponse,
-            // onBlock first
-            txIndex: -2,
-            logIndex: -2,
+            // set really big to make sure onBlock is sorted to the end for this block
+            txIndex: 999999999999999,
+            logIndex: 999999999999999,
           });
         } else if (
           op.eventName === "onTransaction" &&
@@ -672,9 +670,10 @@ export const processListenerBlock = async (
                     : ({} as unknown as TransactionReceipt)),
                 })
               ),
-              // onTx first out of tx & events
+              // onTx called after all other events for this tx
               txIndex: receipts[tx.hash].transactionIndex,
-              logIndex: -1,
+              // set really big to make sure onTx is sorted to the end of the tx's events
+              logIndex: 999999999999999,
             });
           }
         } else if (
@@ -766,7 +765,7 @@ export const processListenerBlock = async (
     }
 
     // make sure we haven't been cancelled before we get here
-    if (!parts.cancelled) {
+    if (!blockParts.cancelled) {
       // sort the events (this order might yet change if we add new syncs in any events)
       const sorted = events.sort((a, b) => {
         // check the transaction order of the block
@@ -804,7 +803,7 @@ export const processListenerBlock = async (
           // position queue marker at new length
           promiseQueueBeforeEachProcess = engine.promiseQueue.length;
           // process the callback for the given type
-          await processCallback(event, parts, processed);
+          await processCallback(event, blockParts, processed);
         } catch (e) {
           // log any errors from handlers - this should probably halt execution
           console.log(e);
@@ -821,7 +820,7 @@ export const processListenerBlock = async (
       }
 
       // commit or revert
-      if (!parts.cancelled) {
+      if (!blockParts.cancelled) {
         // move thes changes to the parent checkpoint
         await engine?.stage?.commit();
       } else {
@@ -833,7 +832,7 @@ export const processListenerBlock = async (
       if (!silent) process.stdout.write(`(${processed.length}) `);
 
       // if we havent been cancelled up to now we can commit this
-      if (!parts.cancelled) {
+      if (!blockParts.cancelled) {
         // only attempt to save changes when the queue is clear (or it has been 15s since we last stored changes)
         if (
           queueLength === 0 ||

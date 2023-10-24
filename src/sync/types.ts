@@ -233,7 +233,7 @@ export type SyncConfig = {
 // Defines a SyncEvent obj
 export type SyncEvent = {
   type: string;
-  data: ethers.Event;
+  data: ethers.Event | string | number;
   number: number;
   blockNumber: number;
   chainId: number;

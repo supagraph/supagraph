@@ -73,6 +73,7 @@ export const txsFromRange = async (
   reqStack: (() => Promise<any>)[],
   result: Set<{
     hash: string;
+    txIndex: number;
     block: number;
   }>,
   silent?: boolean
@@ -92,32 +93,36 @@ export const txsFromRange = async (
 
       // save the transactions
       await Promise.all(
-        block.transactions.map(async (tx: string | TransactionResponse) => {
-          // add the fetched block to the result
-          result.add({
-            // allow for the tx to be passed as its hash (we're currently requesting all txResponses from the block so it will never be a string atm)
-            hash: typeof tx === "string" ? tx : tx.hash,
-            block: +parseInt(`${block.number}`).toString(10),
-          });
+        block.transactions.map(
+          async (tx: string | TransactionResponse, txIndex: number) => {
+            // add the fetched block to the result
+            result.add({
+              // index according to position in the block
+              txIndex,
+              // allow for the tx to be passed as its hash (we're currently requesting all txResponses from the block so it will never be a string atm)
+              hash: typeof tx === "string" ? tx : tx.hash,
+              block: +parseInt(`${block.number}`).toString(10),
+            });
 
-          // if collectTxReceipts fetch the receipt
-          const saveTx =
-            !collectTxReceipts && typeof tx !== "string"
-              ? tx
-              : {
-                  // txResponse & txReceipt if collectTxReceipts
-                  ...(typeof tx === "string" ? {} : tx),
-                  // replace this with a fetch to the rpc to get the full tx receipt (including gas details)
-                  ...(await getTransactionReceipt(provider, tx)),
-                };
+            // if collectTxReceipts fetch the receipt
+            const saveTx =
+              !collectTxReceipts && typeof tx !== "string"
+                ? tx
+                : {
+                    // txResponse & txReceipt if collectTxReceipts
+                    ...(typeof tx === "string" ? {} : tx),
+                    // replace this with a fetch to the rpc to get the full tx receipt (including gas details)
+                    ...(await getTransactionReceipt(provider, tx)),
+                  };
 
-          // save each tx to disk to release from mem
-          await saveJSON(
-            "transactions",
-            `${chainId}-${typeof tx === "string" ? tx : tx.hash}`,
-            saveTx as unknown as Record<string, unknown>
-          );
-        })
+            // save each tx to disk to release from mem
+            await saveJSON(
+              "transactions",
+              `${chainId}-${typeof tx === "string" ? tx : tx.hash}`,
+              saveTx as unknown as Record<string, unknown>
+            );
+          }
+        )
       );
     } else {
       // trigger error handler and retry...
@@ -160,10 +165,14 @@ export const txsFromRange = async (
                 // add all tx hashes to the result
                 await Promise.all(
                   data.transactions.map(
-                    async (tx: string | TransactionResponse) => {
+                    async (
+                      tx: string | TransactionResponse,
+                      txIndex: number
+                    ) => {
                       const hash = typeof tx === "string" ? tx : tx.hash;
                       result.add({
                         hash,
+                        txIndex,
                         block: from,
                       });
                       // save each tx to disk to release from mem
@@ -220,6 +229,7 @@ export const txsFromRange = async (
 export const wrapTxRes = async (
   entries: {
     hash: string;
+    txIndex: number;
     block: number;
   }[],
   provider: JsonRpcProvider | WebSocketProvider,
@@ -235,6 +245,10 @@ export const wrapTxRes = async (
         chainId: provider.network.chainId,
         collectTxReceipt: true,
         collectBlock: true,
+        // copy txIndex onto the instance for pre-data collect sort order
+        txIndex: entry.txIndex,
+        // process after all other events for the given tx
+        logIndex: 999999999999999,
       };
     })
   );
@@ -253,6 +267,7 @@ export const getNewTransactions = async (
   // collect a list of events then map the event type to each so that we can rebuild all events into a single array later
   const result = new Set<{
     hash: string;
+    txIndex: number;
     block: number;
   }>();
   // get the chainId

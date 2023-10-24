@@ -233,15 +233,21 @@ export const sync = async ({
 
     // event listener will see all blocks and transactions passing everything to appropriate handlers in block/tx/log order (grouped by type)
     if (listen) {
-      // get all chainIds for defined networks
+      // create an ingestor to start buffering blocks+receipts as they are emitted
       ingestor = await createIngestor(
+        // control how many reqs we make concurrently
         numBlockWorkers,
         numTransactionWorkers,
-        printIngestionErrors
+        // to enable easier debug set printIngestionErrors to print dumps and logs
+        config
+          ? config.printIngestionErrors ?? printIngestionErrors
+          : printIngestionErrors
       );
-      // start workers to begin processing blocks
+
+      // start workers to begin processing any blocks added to the incoming stream
       await ingestor.startWorkers();
-      // attach listeners to send blocks to the ingestor
+
+      // attach listeners to the networks to send blocks to the ingestor as they occur (we will process blocks in the order they are received here)
       listeners = await createListeners(
         ingestor,
         controls,

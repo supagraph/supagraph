@@ -9,6 +9,8 @@ import { Sync, SyncOp, SyncEvent, SyncConfig, Handlers } from "@/sync/types";
 
 import { Entity, getEngine, Store } from "@/sync/tooling/persistence/store";
 
+import { toEventData } from "@/utils/toEventData";
+
 // how long to lock the db between sync attempts
 export const LOCKED_FOR = 10;
 
@@ -146,7 +148,7 @@ export const updateSyncPointers = async (
 
       // extract latest update (only move the latestBlock when fromBlock !== toBlock)
       const latestBlockNumber =
-        chainsLatestBlock?.data.blockNumber ||
+        toEventData(chainsLatestBlock?.data).blockNumber ||
         chainsLatestBlock?.blockNumber ||
         engine.startBlocks[chainId];
       // if timestamp isnt available default to using blockNumber in its place

@@ -151,6 +151,8 @@ export const wrapBlockRes = async (
         chainId: provider.network.chainId,
         collectTxReceipt: false,
         collectBlock: true,
+        txIndex: 999999999999999,
+        logIndex: 999999999999999,
       };
     })
   );

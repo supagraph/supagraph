@@ -10,6 +10,7 @@ import csvWriter from "csv-write-stream";
 
 // types for sync events
 import { SyncEvent, SyncStage } from "@/sync/types";
+import { toEventData } from "@/utils";
 
 // working directory of the calling project or tmp if in prod
 export const cwd =
@@ -118,6 +119,8 @@ export const readLatestRunCapture = async (
     collectTxReceipt: boolean;
     timestamp?: number;
     from?: string;
+    txIndex?: number;
+    logIndex?: number;
   }[]
 > => {
   const results: {
@@ -130,6 +133,8 @@ export const readLatestRunCapture = async (
     collectTxReceipt: boolean;
     timestamp?: number;
     from?: string;
+    txIndex?: number;
+    logIndex?: number;
   }[] = [];
 
   return new Promise((resolve, reject) => {
@@ -139,20 +144,23 @@ export const readLatestRunCapture = async (
         if (data[0] !== "type") {
           results.push({
             type: data.type,
-            data: {
-              blockNumber: parseInt(data.blockNumber, 10),
-              blockHash: data.blockHash,
-              transactionIndex: parseInt(data.transactionIndex, 10),
-              removed: data.removed === "true",
-              address: data.address,
-              data: data.data,
-              topics: data.topics?.split(",") || [],
-              transactionHash: data.transactionHash,
-              logIndex: parseInt(data.logIndex, 10),
-              event: data.event,
-              eventSignature: data.eventSignature,
-              args: data.args?.split(",") || [],
-            } as Event,
+            // check if we're restoring event data...
+            data: data.address
+              ? ({
+                  blockNumber: parseInt(data.blockNumber, 10),
+                  blockHash: data.blockHash,
+                  transactionIndex: parseInt(data.transactionIndex, 10),
+                  removed: data.removed === "true",
+                  address: data.address,
+                  data: data.data,
+                  topics: data.topics?.split(",") || [],
+                  transactionHash: data.transactionHash,
+                  logIndex: parseInt(data.logIndex, 10),
+                  event: data.event,
+                  eventSignature: data.eventSignature,
+                  args: data.args?.split(",") || [],
+                } as Event)
+              : data.data,
             collectBlock: data.collectBlock === "true",
             collectTxReceipt: data.collectTxReceipt === "true",
             chainId: parseInt(data.chainId, 10),
@@ -160,6 +168,8 @@ export const readLatestRunCapture = async (
             blockNumber: data.blockNumber,
             timestamp: data.blockTimestamp,
             from: data.from,
+            txIndex: parseInt(data.txIndex, 10),
+            logIndex: parseInt(data.logIndex, 10),
           });
         }
       })
@@ -177,7 +187,7 @@ export const saveLatestRunCapture = async (
   csvFileName: string,
   events: {
     type: string;
-    data: Event | string;
+    data: Event | string | number;
     chainId: number;
     number: number;
     blockNumber: number;
@@ -185,6 +195,8 @@ export const saveLatestRunCapture = async (
     collectTxReceipt: boolean;
     timestamp?: number;
     from?: string;
+    txIndex?: number;
+    logIndex?: number;
   }[]
 ) => {
   // createWriteStream to save this run of raw events to a file
@@ -206,6 +218,7 @@ export const saveLatestRunCapture = async (
       "data",
       "topics",
       "transactionHash",
+      "txIndex",
       "logIndex",
       "event",
       "eventSignature",
@@ -236,8 +249,12 @@ export const saveLatestRunCapture = async (
       collectTxReceipt: boolean;
       timestamp?: number;
       from?: string;
+      txIndex?: number;
+      logIndex?: number;
     }) => {
-      const txData = typeof event.data === "string" ? ({} as any) : event.data;
+      // check txData - we can ignore strings and numbers and count on vals being undf
+      const txData = toEventData(event.data);
+
       // write all values against the headered column
       writer.write({
         type: event.type,
@@ -252,10 +269,11 @@ export const saveLatestRunCapture = async (
         data: txData.data || event.data,
         topics: txData.topics,
         transactionHash: txData.transactionHash,
-        logIndex: txData.logIndex,
         event: txData.event,
         eventSignature: txData.eventSignature,
         args: txData.args,
+        txIndex: event.txIndex ?? txData.transactionIndex,
+        logIndex: event.logIndex ?? txData.logIndex,
         number: event.number,
         from: event.from,
         chainId: event.chainId,

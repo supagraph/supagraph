@@ -6,6 +6,8 @@ import {
 } from "@ethersproject/providers";
 import { ethers } from "ethers";
 
+import { toEventData } from "@/utils/toEventData";
+
 import { getEngine } from "@/sync/tooling/persistence/store";
 import { processPromiseQueue } from "@/sync/tooling/promises";
 
@@ -186,6 +188,8 @@ const wrapEventRes = async (
         chainId: provider.network.chainId,
         collectTxReceipt,
         collectBlock,
+        txIndex: +entry.transactionIndex,
+        logIndex: +entry.logIndex,
       };
     })
   );
@@ -285,17 +289,7 @@ export const getNewSyncEvents = async (
   const { syncProviders } = await getNetworks();
 
   // collate all events from all sync operations
-  let events: {
-    type: string;
-    data: ethers.Event;
-    chainId: number;
-    number: number;
-    blockNumber: number;
-    collectTxReceipt: boolean;
-    collectBlock: boolean;
-    timestamp?: number;
-    from?: string;
-  }[] = [];
+  let events: SyncEvent[] = [];
 
   // we're starting the process here then print the discovery
   if (!silent && (!start || (start && SyncStage[start] < SyncStage.process))) {
@@ -307,7 +301,7 @@ export const getNewSyncEvents = async (
   await Promise.all(
     syncOps.map(async (opSync) => {
       // hydrate the events into this var
-      let newEvents: any = [];
+      let newEvents: SyncEvent[] = [];
 
       // extract info from the sync operation
       const {
@@ -573,15 +567,15 @@ export const getNewSyncEventsSorted = async (
       // sort on blockNumber first
       const blockSort = collectBlocks
         ? (a.timestamp || 0) - (b.timestamp || 0)
-        : (a.blockNumber || a.data.blockNumber || 0) -
-          (b.blockNumber || b.data.blockNumber || 0);
+        : (a.blockNumber || toEventData(a.data).blockNumber || 0) -
+          (b.blockNumber || toEventData(b.data).blockNumber || 0);
       // sort blocks/txs to top
       const txSort =
-        (a.txIndex || a.data?.transactionIndex || 0) -
-        (b.txIndex || b.data?.transactionIndex || 0);
+        (a.txIndex || toEventData(a.data).transactionIndex || 0) -
+        (b.txIndex || toEventData(b.data).transactionIndex || 0);
       const logSort =
-        (a.logIndex || a.data?.logIndex || 0) -
-        (b.logIndex || b.data?.logIndex || 0);
+        (a.logIndex || toEventData(a.data).logIndex || 0) -
+        (b.logIndex || toEventData(b.data).logIndex || 0);
 
       // bail outs to move tx/block handler calls to the top
       if (!blockSort && !txSort && typeof a.data === "string") {

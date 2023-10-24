@@ -1,16 +1,18 @@
-// Using v8 to measure memory usage between swaps
-import * as v8 from "v8";
-
 // Using ethers errors in errorHandler to code check error types
 import { errors } from "ethers";
 
 // Use global supagraph engine to associate listeners with ingestor
-import { getEngine } from "../persistence/store";
-import { getNetworks } from "./providers";
+import { getEngine } from "@/sync/tooling/persistence/store";
+import { getNetworks } from "@/sync/tooling/network/providers";
 
 // Supagraph typings
-import { Migration, Sync } from "../../types";
-import { processListenerBlock } from "../processing";
+import { Migration, Sync } from "@/sync/types";
+
+// Utility to print heap dumps when node is started with --expose-gc
+import { withHeapDump } from "@/utils/withHeapDump";
+
+// Supagraph block processing to divert events to user supplied handlers
+import { processListenerBlock } from "@/sync/tooling/processing";
 
 // Constants used in post requests
 const method = "POST";
@@ -34,7 +36,7 @@ interface Tx {
 interface TxData {
   transactionHash: string;
 }
-interface LineEntry {
+interface BlockEntry {
   block: BlockData;
   receipts: TxData[];
   chainId: number;
@@ -66,7 +68,7 @@ export class Ingestor {
   private blockSaveStreamSwitch: boolean = false;
 
   // Blocks which have been fetched and are ready to write to the blockSaveStream
-  private blockBuffers: Record<
+  private blockReadyBuffer: Record<
     number,
     Record<
       number,
@@ -85,14 +87,14 @@ export class Ingestor {
   // A list of blocks we are currently fetching
   private outgoingBlockQueue: Block[] = [];
 
-  // Transactions which have been fetched and are ready to use in the receipts portion on the blockSaveStream
-  private transactionBuffers: Record<number, Record<string, TxData>> = {};
-
   // Track incoming tx requests
   private incomingTransactionQueue: Tx[] = [];
 
   // Keep track of pending tx requests
   private outgoingTransactionQueue: Tx[] = [];
+
+  // Transactions which have been fetched and are ready to use in the receipts portion on the blockSaveStream
+  private transactionReadyBuffer: Record<number, Record<string, TxData>> = {};
 
   // Keep track of the number of lines written / pending
   private pendingBlockCount: number = 0;
@@ -105,9 +107,6 @@ export class Ingestor {
 
   // Should we be logging to the console?
   private silent: boolean = false;
-
-  // Is the system halted?
-  private halted: boolean = true;
 
   // Is the system in swap mode (prevent writes until complete)
   private swapping: boolean = false;
@@ -124,22 +123,25 @@ export class Ingestor {
   // The number of workers to use for tx data fetching
   private numTransactionWorkers: number = 22;
 
+  // Is the double-buffer setup running?
+  private isDoubleBufferRunning: boolean = false;
+
   // Method to call with each line we discover
-  private withLine: (
+  private withBlock: (
     ingestor: Ingestor,
-    line: LineEntry
+    line: BlockEntry
   ) => void | Promise<void>;
 
   // Construct with options...
   constructor({
-    withLine,
+    withBlock,
     rpcUrls = {},
     silent = false,
     maxRetries = 3,
     numBlockWorkers = 10,
     numTransactionWorkers = 22,
   }: {
-    withLine: (ingestor: Ingestor, line: LineEntry) => void | Promise<void>;
+    withBlock: (ingestor: Ingestor, block: BlockEntry) => void | Promise<void>;
     rpcUrls?: Record<number, string>;
     silent?: boolean;
     maxRetries?: number;
@@ -147,14 +149,14 @@ export class Ingestor {
     numTransactionWorkers?: number;
   }) {
     // copy user supplied options to context
-    this.withLine = withLine;
+    this.withBlock = withBlock;
     // extend rpcUrls with user definitions
     this.rpcUrls = { ...this.rpcUrls, ...rpcUrls };
-    // record options
+    // worker env options
     this.maxRetries = maxRetries;
     this.numBlockWorkers = numBlockWorkers;
     this.numTransactionWorkers = numTransactionWorkers;
-    // optionally print heap dumps every file switch
+    // should we be printing logs/switch-heap-dump
     this.silent = silent;
     // initiate the workerPool
     this.blockWorkerPool = new Array(this.numBlockWorkers);
@@ -163,7 +165,7 @@ export class Ingestor {
 
   // Expose the length of the blockQueue
   public get blockQueueLength() {
-    // count all places that blocks can be (pendingBlockCount will keep track of what is written to disk)
+    // count all places that blocks can be (pendingBlockCount will keep track of what is present in the active buffer)
     return (
       this.pendingBlockCount +
       this.incomingBlockQueue.length +
@@ -173,20 +175,28 @@ export class Ingestor {
 
   // Get the appropriate RPC url for the chainId
   private getRpcUrl(chainId: number): string {
-    return this.rpcUrls[chainId] || "https://default-rpc-url.com";
+    // throw error if we don't recognise the chainId
+    if (!this.rpcUrls[chainId]) {
+      // complete processing and throw error
+      this.stopProcessing(false);
+      // we can't continue if we're working with unknown chains
+      throw new Error(`Unable to getUrl for chainId ${chainId}`);
+    }
+
+    // return the known rpcUrl
+    return this.rpcUrls[chainId];
   }
 
   // Logic to add a block to the queue
   public addBlock(block: Block) {
+    // always add blocks if we're listening or not
     this.incomingBlockQueue.push(block);
   }
 
-  // Logic to start the workers in both pool
+  // Logic to start the workers in both pools - this will enable block & tx fetching but not processing...
   public async startWorkers() {
     // if we havent started the listeners yet
     if (!this.listening) {
-      // unhalt the system
-      this.halted = false;
       // mark listener open
       this.listening = true;
       // open the workers
@@ -200,16 +210,20 @@ export class Ingestor {
     }
   }
 
-  // Logic to start processing blocks (swapOutputFiles to read pending blocks and to initiate recursive double-buffer processing)
+  // Logic to start processing blocks (swapOutputBuffers to read pending blocks and to initiate recursive double-buffer processing)
   public async startProcessing() {
-    // swap output files to start processing anything added before now
-    return this.swapOutputFiles().then(() => this.startWorkers());
+    // we only run the swapOutput
+    if (!this.isDoubleBufferRunning) {
+      // swap output files to start processing anything added before now
+      return this.swapOutputBuffers().then(this.startWorkers.bind(this));
+    }
+    // already buffering...
+    return undefined;
   }
 
   // Logic to stop processing and clear the queue if needed
   public async stopProcessing(clear?: boolean) {
-    // mark closed on the instance
-    this.halted = true;
+    // stop listeners from adding new blocks
     this.listening = false;
     // await current work to finish - as halted is marked we won't replace these workers
     await Promise.all(this.blockWorkerPool.map(async (promise) => promise));
@@ -224,11 +238,11 @@ export class Ingestor {
     // if we're not clearing we should restack any blocks which are partially processed
     if (!clear) {
       // clear the buffer
-      this.blockBuffers = {};
+      this.blockReadyBuffer = {};
 
       // restack any blocks in the pending queue
       const blocks: Block[] = [];
-      await this.processPreviousFile((_, line: Block) => {
+      await this.processPreviousBuffer((_, line: Block) => {
         blocks.push(line);
       });
 
@@ -245,12 +259,12 @@ export class Ingestor {
       }
     } else {
       // clear all buffers and queues
-      this.blockBuffers = {};
+      this.blockReadyBuffer = {};
       this.incomingBlockQueue.length = 0;
       this.outgoingBlockQueue.length = 0;
     }
     // cleanup txQueue, we don't need to reuse anything here
-    this.transactionBuffers = {};
+    this.transactionReadyBuffer = {};
     this.incomingTransactionQueue.length = 0;
     this.outgoingTransactionQueue.length = 0;
   }
@@ -258,7 +272,7 @@ export class Ingestor {
   // Logic to process a block and to trigger its buffering
   private async processBlock(block: BlockData, chainId: number) {
     // ensure the buffer exists for the given chain
-    if (!this.blockBuffers[chainId]) this.blockBuffers[chainId] = {};
+    if (!this.blockReadyBuffer[chainId]) this.blockReadyBuffer[chainId] = {};
 
     // if this rejects we will restack the block and try again
     return new Promise<void>((resolve, reject) => {
@@ -267,28 +281,7 @@ export class Ingestor {
       // try to resolve for 10seconds
       const timeout = setTimeout(() => {
         // clean up tx queues
-        block.transactions.forEach((tx) => {
-          // delete all from outgoing
-          const outgoingDelIndex = this.outgoingTransactionQueue.findIndex(
-            (queueTx) =>
-              queueTx &&
-              (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
-          );
-          if (outgoingDelIndex !== -1)
-            delete this.outgoingTransactionQueue[outgoingDelIndex];
-          // delete all from incoming
-          const incomingDelIndex = this.incomingTransactionQueue.findIndex(
-            (queueTx) =>
-              queueTx &&
-              (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
-          );
-          if (incomingDelIndex !== -1)
-            delete this.incomingTransactionQueue[incomingDelIndex];
-          // delete from the buffer incase of bogus response
-          delete this.transactionBuffers[chainId][
-            typeof tx === "string" ? tx : tx.hash
-          ];
-        });
+        this.cancelFecthAndAppendReceipts(block, chainId);
         // mark as cancelled
         controls.cancelled = true;
         // timeout the request
@@ -302,7 +295,7 @@ export class Ingestor {
           (blockAndReceipts) => {
             if (blockAndReceipts) {
               // place the block into the buffer
-              this.blockBuffers[chainId][+block.number] = {
+              this.blockReadyBuffer[chainId][+block.number] = {
                 ...blockAndReceipts,
                 number: +block.number,
                 chainId,
@@ -335,7 +328,7 @@ export class Ingestor {
       // pick the next one
       const next = this.outgoingBlockQueue[0];
       // check if its buffered entry is ready
-      const nextBlock = this.blockBuffers[next.chainId][next.number];
+      const nextBlock = this.blockReadyBuffer[next.chainId][next.number];
 
       // when we have the nextBlock and we're not in swapping mode...
       if (!this.swapping && nextBlock) {
@@ -349,7 +342,7 @@ export class Ingestor {
   }
 
   // Logic to write a block to the stream
-  private writeBlockToStream(block: Block, blockData: LineEntry) {
+  private writeBlockToStream(block: Block, blockData: BlockEntry) {
     setImmediate(() => {
       // pushh to the active blockStream
       (this.blockSaveStreamSwitch
@@ -364,19 +357,19 @@ export class Ingestor {
       // incr the pending line count (decr when we read it)
       this.pendingBlockCount += 1;
       // delete the buffered entry for gc to collect
-      delete this.blockBuffers[block.chainId][block.number];
+      delete this.blockReadyBuffer[block.chainId]?.[block.number];
     });
   }
 
   // Process a transaction (place it in the buffer ready to be recognised by the polling sequence in fetchAndAppendReceipts)
   private async processTransaction(receipt: TxData, chainId: number) {
     // ensure the buffer exists for the given chain
-    if (!this.transactionBuffers[chainId]) {
-      this.transactionBuffers[chainId] = {};
+    if (!this.transactionReadyBuffer[chainId]) {
+      this.transactionReadyBuffer[chainId] = {};
     }
 
     // place the transaction into the buffer
-    this.transactionBuffers[chainId][receipt.transactionHash] = receipt;
+    this.transactionReadyBuffer[chainId][receipt.transactionHash] = receipt;
   }
 
   // fetch the receipts and return them along with the block
@@ -388,27 +381,8 @@ export class Ingestor {
     }
   ): Promise<{ block: BlockData; receipts: TxData[] }> {
     try {
-      if (
-        // check for length
-        block.transactions.length &&
-        // not the most efficient - but we want to check the tx's havent already been stacked
-        this.incomingTransactionQueue.findIndex(
-          (tx) =>
-            tx &&
-            tx.hash ===
-              (typeof block.transactions[0] === "string"
-                ? block.transactions[0]
-                : block.transactions[0].hash)
-        ) === -1 &&
-        this.outgoingTransactionQueue.findIndex(
-          (tx) =>
-            tx &&
-            tx.hash ===
-              (typeof block.transactions[0] === "string"
-                ? block.transactions[0]
-                : block.transactions[0].hash)
-        ) === -1
-      ) {
+      // check if we've already enqueued everything for processing or not
+      if (!this.isPendingFetchAndAppendReceipts(block)) {
         // append all items to the queue for processing
         this.incomingTransactionQueue.push(
           ...block.transactions
@@ -433,39 +407,28 @@ export class Ingestor {
             .map((tx) => {
               return new Promise<TxData>((resolve, reject) => {
                 // return the receipts
-                if (this.transactionBuffers[chainId][tx.hash]) {
-                  resolve(this.transactionBuffers[chainId][tx.hash]);
+                if (
+                  this.transactionReadyBuffer[chainId][
+                    typeof tx === "string" ? tx : tx.hash
+                  ]
+                ) {
+                  resolve(
+                    this.transactionReadyBuffer[chainId][
+                      typeof tx === "string" ? tx : tx.hash
+                    ]
+                  );
                 } else {
                   reject();
                 }
               });
             })
-        ).catch((e) => {
-          // throw in context
-          throw e;
-        });
+        );
 
         // if we cancel this on the outside propagate through
         if (controls.cancelled) throw new Error("Cancelled after timeout");
 
-        // iterate and delete from buffer
-        block.transactions.forEach((tx) => {
-          // make sure the tx exists
-          if (tx) {
-            // discover del index
-            const delIndex = this.outgoingTransactionQueue.findIndex(
-              (queueTx) =>
-                queueTx &&
-                (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
-            );
-            // delete from the buffer
-            delete this.transactionBuffers[chainId][
-              typeof tx === "string" ? tx : tx.hash
-            ];
-            // delete from the queue
-            if (delIndex !== -1) delete this.outgoingTransactionQueue[delIndex];
-          }
-        });
+        // clear any remnants from buffers
+        this.cancelFecthAndAppendReceipts(block, chainId);
 
         // return block and receipts
         return {
@@ -492,28 +455,7 @@ export class Ingestor {
           }, 1e3);
         } else {
           // clear all tx's from queues
-          block.transactions.forEach((tx) => {
-            // delete all from outgoing
-            const outgoingDelIndex = this.outgoingTransactionQueue.findIndex(
-              (queueTx) =>
-                queueTx &&
-                (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
-            );
-            if (outgoingDelIndex !== -1)
-              delete this.outgoingTransactionQueue[outgoingDelIndex];
-            // delete all from incoming
-            const incomingDelIndex = this.incomingTransactionQueue.findIndex(
-              (queueTx) =>
-                queueTx &&
-                (typeof tx === "string" ? tx : tx.hash) === queueTx.hash
-            );
-            if (incomingDelIndex !== -1)
-              delete this.incomingTransactionQueue[incomingDelIndex];
-            // delete from the buffer incase of bogus response
-            delete this.transactionBuffers[chainId][
-              typeof tx === "string" ? tx : tx.hash
-            ];
-          });
+          this.cancelFecthAndAppendReceipts(block, chainId);
           // throw in outer context to throw the block fetch (will throw parent to throw parent etc...)
           reject(e);
         }
@@ -521,9 +463,63 @@ export class Ingestor {
     }
   }
 
+  // Check if the list of tx's is already pending on the queue
+  private isPendingFetchAndAppendReceipts(block: BlockData) {
+    // check for the presence of tx[0] in the incoming/outgoing queues to mark that we've already stacked this block
+    return !(
+      // if there are no tx's on the block we can move straight to the resolution stage (which wont throw on empty)
+      (
+        block.transactions.length &&
+        // not the most efficient - but we want to check the tx's havent already been stacked
+        this.incomingTransactionQueue.findIndex(
+          (tx) =>
+            tx &&
+            tx.hash ===
+              (typeof block.transactions[0] === "string"
+                ? block.transactions[0]
+                : block.transactions[0].hash)
+        ) === -1 &&
+        this.outgoingTransactionQueue.findIndex(
+          (tx) =>
+            tx &&
+            tx.hash ===
+              (typeof block.transactions[0] === "string"
+                ? block.transactions[0]
+                : block.transactions[0].hash)
+        ) === -1
+      )
+    );
+  }
+
+  // Cancel a fetch and append receipts operation (we will restack the block and req these again)
+  private cancelFecthAndAppendReceipts(block: BlockData, chainId: number) {
+    // iterate and remove mention of all tx's in this block
+    block.transactions.forEach((tx) => {
+      if (tx) {
+        // get txHash
+        const txHash = typeof tx === "string" ? tx : tx.hash;
+        // splice tx from outgoing
+        const outgoingDelIndex = this.outgoingTransactionQueue.findIndex(
+          (queueTx) => queueTx && txHash === queueTx.hash
+        );
+        if (outgoingDelIndex !== -1)
+          this.outgoingTransactionQueue.splice(outgoingDelIndex, 1);
+        // splice tx from incoming
+        const incomingDelIndex = this.incomingTransactionQueue.findIndex(
+          (queueTx) => queueTx && txHash === queueTx.hash
+        );
+        if (incomingDelIndex !== -1)
+          this.incomingTransactionQueue.splice(incomingDelIndex, 1);
+
+        // delete from the buffer incase of bogus response, fetch it again on a good req
+        delete this.transactionReadyBuffer[chainId]?.[txHash];
+      }
+    });
+  }
+
   // Worker definition to take a block and to fetch its content
   private async blockWorker(index: number) {
-    while (!this.halted) {
+    while (this.listening) {
       // take the next block to be processed from the incoming queue
       const block = this.incomingBlockQueue.shift();
 
@@ -562,19 +558,13 @@ export class Ingestor {
 
     // in the next-tick, check that we havent halted execution before starting a new worker to replace ourself
     setTimeout(() => {
-      if (!this.halted) this.startBlockWorker(index);
+      if (this.listening) this.startBlockWorker(index);
     });
-  }
-
-  // Start workers to fetch block data
-  private startBlockWorker(index: number) {
-    // start worker and set it against the pool
-    this.blockWorkerPool[index] = this.blockWorker(index);
   }
 
   // Create workers to process transactions along side blocks (blocks thread is block by transaction thread)
   private async transactionWorker(index: number) {
-    while (!this.halted) {
+    while (this.listening) {
       // take the next tx to be processed from the incoming queue
       const tx = this.incomingTransactionQueue.shift();
 
@@ -609,8 +599,14 @@ export class Ingestor {
 
     // in the next-tick, check that we havent halted execution before starting a new worker to replace ourself
     setTimeout(() => {
-      if (!this.halted) this.startTransactionWorker(index);
+      if (this.listening) this.startTransactionWorker(index);
     });
+  }
+
+  // Start workers to fetch block data
+  private startBlockWorker(index: number) {
+    // start worker and set it against the pool
+    this.blockWorkerPool[index] = this.blockWorker(index);
   }
 
   // Start transaction worker at index to replace itself
@@ -644,9 +640,14 @@ export class Ingestor {
   }
 
   // Logic to switch the current file buffer and to trigger a content flush
-  private async swapOutputFiles() {
+  private async swapOutputBuffers() {
     // stop swapping when halted
-    if (!this.halted) {
+    if (!this.listening) {
+      // mark doubleBuffer as closed
+      this.isDoubleBufferRunning = false;
+    } else {
+      // mark as running
+      this.isDoubleBufferRunning = true;
       // if blocks have been added to the inactive file, switch and read (else just timeout for another second)
       if (this.pendingBlockCount > 0) {
         // mark that we've entered swapping mode (temp lock)
@@ -659,17 +660,17 @@ export class Ingestor {
         this.swapping = false;
 
         // process all content from the inactive file (wait until all lines have been processed)
-        await this.processPreviousFile(this.withLine);
+        await this.processPreviousBuffer(this.withBlock);
       }
 
       // switch back to the inactive file in 1second (which should give the current active file time to accumulate data for processing)
-      setTimeout(this.swapOutputFiles.bind(this), 1e3);
+      setTimeout(this.swapOutputBuffers.bind(this), 1e3);
     }
   }
 
   // Process the inactive file...
-  private async processPreviousFile(
-    withLine: (ingestor: Ingestor, line: LineEntry) => void | Promise<void>
+  private async processPreviousBuffer(
+    withBlock: (ingestor: Ingestor, block: BlockEntry) => void | Promise<void>
   ) {
     // blockSaveStreamSwitch switched just before we entered this function, we want to read the opposite file to the saveStream
     const previousReadArray = this.blockSaveStreamSwitch
@@ -679,11 +680,22 @@ export class Ingestor {
     // for await (const line of previousReadArray) {
     while (previousReadArray.length > 0) {
       // shift the line and process
-      const line = previousReadArray.shift();
+      const block = previousReadArray.shift();
       // process the line
       try {
-        // attempt the provided withLine call
-        await withLine(this, line);
+        // enqueue the promise but then setImmediate to process it in the next call-frame
+        // this will release event loop to allow fetching to continue in the background whilst we process withBlock callbacks
+        // but it will continue blocking the double-buffer switch untill we complete the processing of all blocks in the inactive buffer
+        await new Promise((resolve, reject) => {
+          setImmediate(async () => {
+            try {
+              // attempt the provided withBlock call
+              resolve(await withBlock(this, block));
+            } catch (e) {
+              reject(e);
+            }
+          });
+        });
       } catch (e) {
         // log errors but dont stop
         if (!this.silent) console.error(e);
@@ -693,28 +705,8 @@ export class Ingestor {
       }
     }
 
-    // print heapdump and trigger gc
-    this.v8Print("Swap file heap dump");
-  }
-
-  // Print a heap dump if gc is enabled for manual management
-  private v8Print(message: string) {
-    if (!this.silent && global.gc) {
-      global.gc();
-      const heapStats = v8.getHeapStatistics();
-      const heapStatsMB = heapStats;
-      // eslint-disable-next-line guard-for-in
-      for (const key in heapStatsMB) {
-        heapStatsMB[key] = `${(
-          ((heapStatsMB[key] / 1024 / 1024) * 100) /
-          100
-        ).toFixed(2)} MB`;
-      }
-      console.log("");
-      console.log(message);
-      console.table(heapStatsMB);
-      console.log("");
-    }
+    // print heapdump and trigger gc (when not running in silent mode)
+    withHeapDump("Swap file heap dump", this.silent);
   }
 }
 
@@ -736,9 +728,7 @@ async function fetchDataWithRetries<T>(
       const controller = new AbortController();
 
       // timeout after 30seconds
-      const timeout = setTimeout(() => {
-        controller.abort();
-      }, 30e3);
+      const timeout = setTimeout(controller.abort, 30e3);
 
       // use fetch to grab the blockdata directly from the rpcUrl endpoint
       response = await fetch(url, {
@@ -760,18 +750,14 @@ async function fetchDataWithRetries<T>(
       clearTimeout(timeout);
 
       // return the result
-      if (data.result) {
-        return data.result as T;
-      }
+      if (data.result) return data.result as T;
     } catch (error) {
       // if theres an error we'll try again upto maxRetries
       if (!silent)
         console.error(`Error fetching ${rpcMethod} (retry ${retry}):`, error);
     } finally {
       // finally if we returned or errored, we need to cancel the body to close the resource
-      if (response && !response.bodyUsed) {
-        response.body.cancel();
-      }
+      if (response && !response.bodyUsed) response.body.cancel();
     }
   }
 
@@ -792,14 +778,14 @@ export async function createIngestor(
 
   // return the new ingestor
   return new Ingestor({
-    // place a withLine function to trigger processing
-    withLine: async (ingestor, line) => {
+    // place a withBlock function to handle processing
+    withBlock: async (ingestor, block) => {
       // attempt to process the block
       await processListenerBlock(
         // blockNumber being processed...
-        +line.number,
+        +block.number,
         // the chainId it belongs to...
-        +line.chainId,
+        +block.chainId,
         // process validOps [for this chain] each tick to associate any new syncs (cache and invalidate?)
         await getValidSyncOps(),
         // pass through the config...
@@ -812,29 +798,31 @@ export async function createIngestor(
         engine.indexedMigrations,
         engine.indexedMigrationEntities, // <-- TODO: reimplement this.
         // pass through the promise which is reading the block data back from disk
-        Promise.resolve({
+        {
           // this is the full block with TransactionResponses
-          block: line.block,
+          block: block.block,
           // this is an index of all receipts against their txHash
-          receipts: line.receipts.reduce((receipts, receipt) => {
+          receipts: block.receipts.reduce((receipts, receipt) => {
             // index the receipts against their hash
             receipts[receipt.transactionHash] = receipt;
 
             // return all indexed receipts
             return receipts;
           }, {}),
-        })
+        }
       );
     },
     // return an object of all available rpc urls
     rpcUrls: Object.keys(syncProviders).reduce((rpcUrls, chainId) => {
+      // extract connection urls from provided JSON rpcs
       rpcUrls[chainId] = syncProviders[chainId].connection.url;
+      // return all urls indexed against chainId
       return rpcUrls;
     }, {}),
     // pass through workers config
     numBlockWorkers,
     numTransactionWorkers,
-    // should we skip reporting on swap heap dumps and ingestion error logs?
+    // should we skip reporting on swap heap dumps and ingestion error logs? (these should only be used to debug)
     silent: !printIngestorErrors,
   });
 }
@@ -877,7 +865,7 @@ export async function createListeners(
 
   // returning an array of [softClose, hardClose]
   return [
-    // soft close (so that we can continue again)
+    // soft close (so that we can continue again later)
     async () => {
       // await everything halting
       await halt(controls, attached);
@@ -886,6 +874,7 @@ export async function createListeners(
       // resolve the error handler without throwing
       errorHandler.resolve();
     },
+    // hard close (this will exit the process after completing all closing procedures)
     async () => {
       // return close to allow external closure
       await exit(ingestor, controls, errorHandler, attached);
@@ -1068,7 +1057,7 @@ async function exit(
   setTimeout(() => process.exit(1));
 }
 
-// Restructure ops into ops by chainId
+// Restructure ops into ops by chainId (we provide this new every time we process a block to register any newly added syncs from the prev block we processed)
 async function getValidSyncOps() {
   // get the engine
   const engine = await getEngine();

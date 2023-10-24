@@ -18,7 +18,7 @@ export const attemptFnCall = async <T extends Record<string, any>>(
   type: string,
   dets: {
     type: string;
-    data: Event;
+    data: Event | string | number;
     chainId: number;
     blockNumber: number;
     timestamp?: number;
