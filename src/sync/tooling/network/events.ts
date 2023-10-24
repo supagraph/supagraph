@@ -294,7 +294,7 @@ export const getNewSyncEvents = async (
   // we're starting the process here then print the discovery
   if (!silent && (!start || (start && SyncStage[start] < SyncStage.process))) {
     // detail everything which was loaded in this run
-    console.log("\n\nStarting sync by collecting events...\n\n--\n");
+    console.log("\nStarting sync by collecting events...\n\n--\n");
   }
 
   // process all requests at once

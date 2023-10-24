@@ -727,8 +727,8 @@ async function fetchDataWithRetries<T>(
       // set an abort controller to timeout the request
       const controller = new AbortController();
 
-      // timeout after 30seconds
-      const timeout = setTimeout(controller.abort, 30e3);
+      // timeout after 30seconds by aborting the request
+      const timeout = setTimeout(() => controller.abort(), 30e3);
 
       // use fetch to grab the blockdata directly from the rpcUrl endpoint
       response = await fetch(url, {
