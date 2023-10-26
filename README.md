@@ -10,6 +10,7 @@ Supagraph is an open-source toolkit for building efficient cross-chain indexes f
 - ✅ - Handle `async` messages in the `sync` process to be awaited later (non-blocking `async` handling of sequential processes)
 - ✅ - Sync as a daemon or on a schedule
 - ✅ - Support for migrations, factory contracts and recovery scripts
+- ✅ - Support for cron based scheduling
 - ✅ - Easy to deploy anywhere with minimal configuration
 - ✅ - Efficient `graphql` -> `mongo` querying for cheap data storage and retrieval
 - ✅ - Immutable storage option to snapshot state at any block (immutable by default)
@@ -41,6 +42,7 @@ We are depending on:
 - `ethers` to map `Events` to stored `Entities`
 - `mongodb`/`node-persist` as a persistence layer
 - `typescript`, `eslint`, and `prettier` to maintain coding standards
+- `ttsc` and `typescript-transform-paths` for comp
 
 ## Contributing
 

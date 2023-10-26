@@ -93,7 +93,7 @@ export const processCallback = async (
               `${event.chainId}-${eventData.transactionHash}`
             ));
 
-      // block can also be inferred from event if were not collecting blocks for this run
+      // most of the block can also be inferred from event if were not collecting blocks for this run
       const block =
         (blockParts.block &&
           +event.blockNumber === +blockParts.block.number &&
@@ -839,26 +839,32 @@ export const processListenerBlock = async (
           ((engine?.lastUpdate || 0) + 15000 <= new Date().getTime() &&
             queueLength < 1000)
         ) {
-          // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
-          await processPromiseQueue(engine.promiseQueue);
-          // iterate on the syncs and call withPromises
-          for (const group of Object.keys(engine.handlers)) {
-            for (const eventName of Object.keys(engine.handlers[group])) {
-              if (eventName === "withPromises") {
-                // check if we have any postProcessing callbacks to handle
-                await engine.handlers[group][eventName](
-                  engine.promiseQueue,
-                  {} as unknown as {
-                    tx: TransactionReceipt & TransactionResponse;
-                    block: Block;
-                    logIndex: number;
-                  }
-                );
+          try {
+            // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
+            await processPromiseQueue(engine.promiseQueue);
+            // iterate on the syncs and call withPromises
+            for (const group of Object.keys(engine.handlers)) {
+              for (const eventName of Object.keys(engine.handlers[group])) {
+                if (eventName === "withPromises") {
+                  // check if we have any postProcessing callbacks to handle
+                  await engine.handlers[group][eventName](
+                    engine.promiseQueue,
+                    {} as unknown as {
+                      tx: TransactionReceipt & TransactionResponse;
+                      block: Block;
+                      logIndex: number;
+                    }
+                  );
+                }
               }
             }
+          } catch (e) {
+            // print any errors from processing the promise queue section
+            if (!engine.flags.silent) console.log(e);
+          } finally {
+            // clear the promiseQueue for next iteration
+            engine.promiseQueue.length = 0;
           }
-          // clear the promiseQueue for next iteration
-          engine.promiseQueue.length = 0;
 
           // mark after we end the processing
           if (!silent) {

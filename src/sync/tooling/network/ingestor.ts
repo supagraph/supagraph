@@ -48,7 +48,7 @@ export class Ingestor {
   // Object of RPC urls by chainId
   private rpcUrls: Record<number, string> = {};
 
-  // hold an array for temp storage
+  // Hold array for double-buffer storage
   private blockSaveStream1: {
     block: BlockData;
     receipts: TxData[];
@@ -56,7 +56,7 @@ export class Ingestor {
     number: number;
   }[] = [];
 
-  // hold array for double-buffer storage
+  // Hold second array for double-buffer storage
   private blockSaveStream2: {
     block: BlockData;
     receipts: TxData[];
@@ -64,10 +64,22 @@ export class Ingestor {
     number: number;
   }[] = [];
 
-  // Which of the two output files is currently active (double buffer switch)
+  // Which of the two blockSave streams is currently active (double buffer switch)
   private blockSaveStreamSwitch: boolean = false;
 
-  // Blocks which have been fetched and are ready to write to the blockSaveStream
+  // A list of blocks which need to be fetched
+  private incomingBlockQueue: Block[] = [];
+
+  // A list of blocks are currently being fetched
+  private outgoingBlockQueue: Block[] = [];
+
+  // A list of transactions which need to be fetched
+  private incomingTransactionQueue: Tx[] = [];
+
+  // A list of transactions which are currently being fetched
+  private outgoingTransactionQueue: Tx[] = [];
+
+  // Blocks which have been fetched and are ready to write to the active blockSaveStream
   private blockReadyBuffer: Record<
     number,
     Record<
@@ -81,55 +93,43 @@ export class Ingestor {
     >
   > = {};
 
-  // A list of blocks which need to be fetched
-  private incomingBlockQueue: Block[] = [];
-
-  // A list of blocks we are currently fetching
-  private outgoingBlockQueue: Block[] = [];
-
-  // Track incoming tx requests
-  private incomingTransactionQueue: Tx[] = [];
-
-  // Keep track of pending tx requests
-  private outgoingTransactionQueue: Tx[] = [];
-
   // Transactions which have been fetched and are ready to use in the receipts portion on the blockSaveStream
   private transactionReadyBuffer: Record<number, Record<string, TxData>> = {};
 
-  // Keep track of the number of lines written / pending
+  // Keep track of the number of blocks as they enter and exit the saveStream
   private pendingBlockCount: number = 0;
 
   // The pool of workers who are collecting block information
   private blockWorkerPool: Promise<void>[];
 
-  // Another pool for transaction workers
+  // The pool of workers who are collecting transaction information
   private transactionWorkerPool: Promise<void>[] = [];
 
-  // Should we be logging to the console?
+  // Should we be logging anything to the console?
   private silent: boolean = false;
 
-  // Is the system in swap mode (prevent writes until complete)
-  private swapping: boolean = false;
-
-  // Mark when to start listening for addBlock events
-  private listening: boolean = false;
-
-  // The maximum number of retries before throwing an error when fetchign
+  // The maximum number of retries before throwing an error when fetching
   private maxRetries: number = 3;
 
   // The number of workers to use for block data fetching
   private numBlockWorkers: number = 10;
 
-  // The number of workers to use for tx data fetching
+  // The number of workers to use for transaction data fetching
   private numTransactionWorkers: number = 22;
 
-  // Is the double-buffer setup running?
+  // Is the system in swap mode (delay writes until complete)
+  private swapping: boolean = false;
+
+  // Marked when we start listening for addBlock events
+  private listening: boolean = false;
+
+  // Marked when we start processing the double-buffer array system (ie when we start calling withBlock() for each block)
   private isDoubleBufferRunning: boolean = false;
 
   // Method to call with each line we discover
   private withBlock: (
     ingestor: Ingestor,
-    line: BlockEntry
+    block: BlockEntry
   ) => void | Promise<void>;
 
   // Construct with options...
@@ -270,7 +270,7 @@ export class Ingestor {
   }
 
   // Logic to process a block and to trigger its buffering
-  private async processBlock(block: BlockData, chainId: number) {
+  private async bufferBlock(block: BlockData, chainId: number) {
     // ensure the buffer exists for the given chain
     if (!this.blockReadyBuffer[chainId]) this.blockReadyBuffer[chainId] = {};
 
@@ -362,7 +362,7 @@ export class Ingestor {
   }
 
   // Process a transaction (place it in the buffer ready to be recognised by the polling sequence in fetchAndAppendReceipts)
-  private async processTransaction(receipt: TxData, chainId: number) {
+  private async bufferTransaction(receipt: TxData, chainId: number) {
     // ensure the buffer exists for the given chain
     if (!this.transactionReadyBuffer[chainId]) {
       this.transactionReadyBuffer[chainId] = {};
@@ -528,11 +528,8 @@ export class Ingestor {
         break;
       }
 
-      // if the block hasnt been recorded on to the outgoing queue yet...
-      if (this.outgoingBlockQueue.indexOf(block) === -1) {
-        // record the incoming in the outgoing track to order the async results
-        this.outgoingBlockQueue.push(block);
-      }
+      // record the incoming in the outgoing track to order the async results
+      this.outgoingBlockQueue.push(block);
 
       // wrap this so that we can catch errors for retry attempts - these should always succeed
       try {
@@ -544,13 +541,24 @@ export class Ingestor {
 
         // once collected pass the block along for processing
         if (blockData) {
-          // attempt to process the block
-          await this.processBlock(blockData, block.chainId);
+          // attempt to buffer the block into the blockReadyBuffer
+          await this.bufferBlock(blockData, block.chainId);
         } else {
           // cannot proceed - restack and retry
           throw new Error("BlockData must resolve");
         }
       } catch (e) {
+        // lets wait a second after a failed fetch before unshifting it back into the queue (it should only fail on timeout so delay the retry)
+        await new Promise((resolve) => {
+          setTimeout(
+            resolve,
+            // try again in anywhere from 1 to 5 seconds
+            Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+          );
+        });
+        // remove from the outgoing queue, we don't want to mess with counters
+        const delIndex = this.outgoingBlockQueue.indexOf(block);
+        if (delIndex !== -1) this.outgoingBlockQueue.splice(delIndex, 1);
         // place it back on to the queue so we process it again next tick
         this.incomingBlockQueue.unshift(block);
       }
@@ -585,15 +593,11 @@ export class Ingestor {
 
         // once collected pass the tx along for processing
         if (receipt) {
-          // attempt to process the tx
-          await this.processTransaction(receipt, tx.chainId);
-        } else {
-          // cannot proceed - restack and retry
-          throw new Error("TxData must resolve");
+          // attempt to buffer the tx into the transactionReadyBuffer
+          await this.bufferTransaction(receipt, tx.chainId);
         }
-      } catch (e) {
-        // place it back on to the queue so we process it again next tick
-        this.incomingTransactionQueue.unshift(tx);
+      } catch {
+        // we don't want to restack transactions here - we should let the blockWorker handle any reattempts incase the tx no longer exists in the block (reorg)
       }
     }
 
@@ -697,7 +701,7 @@ export class Ingestor {
           });
         });
       } catch (e) {
-        // log errors but dont stop
+        // log errors but dont stop (errors should be caught by the provided withBlock fn)
         if (!this.silent) console.error(e);
       } finally {
         // remove from count
@@ -755,8 +759,16 @@ async function fetchDataWithRetries<T>(
       // if theres an error we'll try again upto maxRetries
       if (!silent)
         console.error(`Error fetching ${rpcMethod} (retry ${retry}):`, error);
+      // lets wait a second after a failed fetch before attempting it again
+      await new Promise((resolve) => {
+        setTimeout(
+          resolve,
+          // try again in anywhere from 1 to 5 seconds
+          Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+        );
+      });
     } finally {
-      // finally if we returned or errored, we need to cancel the body to close the resource
+      // finally, if we returned or errored, we need to cancel the body to close the resource
       if (response && !response.bodyUsed) response.body.cancel();
     }
   }
@@ -769,7 +781,12 @@ async function fetchDataWithRetries<T>(
 export async function createIngestor(
   numBlockWorkers: number,
   numTransactionWorkers: number,
-  printIngestorErrors: boolean = false
+  printIngestorErrors: boolean,
+  errorHandler: {
+    resolved?: boolean;
+    reject?: (reason?: any) => void;
+    resolve?: (value: void | PromiseLike<void>) => void;
+  }
 ) {
   // get the engine
   const engine = await getEngine();
@@ -780,37 +797,69 @@ export async function createIngestor(
   return new Ingestor({
     // place a withBlock function to handle processing
     withBlock: async (ingestor, block) => {
-      // attempt to process the block
-      await processListenerBlock(
-        // blockNumber being processed...
-        +block.number,
-        // the chainId it belongs to...
-        +block.chainId,
-        // process validOps [for this chain] each tick to associate any new syncs (cache and invalidate?)
-        await getValidSyncOps(),
-        // pass through the config...
-        engine.flags.collectBlocks,
-        engine.flags.collectTxReceipts,
-        engine.flags.silent,
-        // pass through the length of the queue for reporting and for deciding if we should be saving or not
-        ingestor.blockQueueLength - 1, // -1 to offset the line we're currently printing
-        // helper parts to pass through entities, block & receipts...
-        engine.indexedMigrations,
-        engine.indexedMigrationEntities, // <-- TODO: reimplement this.
-        // pass through the promise which is reading the block data back from disk
-        {
-          // this is the full block with TransactionResponses
-          block: block.block,
-          // this is an index of all receipts against their txHash
-          receipts: block.receipts.reduce((receipts, receipt) => {
-            // index the receipts against their hash
-            receipts[receipt.transactionHash] = receipt;
+      // with next block after the catchup sync...
+      if (engine.latestBlocks[+block.chainId].number < block.number) {
+        // kill this before moving on - but use to end process if we spend too long here (we can get trapped on the awaitPromiseQueue)
+        const timeout = setTimeout(
+          () => {
+            // don't reject if we've disabled the timeout (we can do this in the handler before the 30s hits (and restore it on long-process completion))
+            if ((engine.processTimeout ?? 30e3) > 0) {
+              // reject on the handler (this will close the connection)
+              errorHandler.reject(
+                new Error(
+                  `Failed to process a block in ${
+                    (engine.processTimeout ?? 30e3) / 1e3
+                  }s - restart`
+                )
+              );
+            }
+          },
+          // default to 30s if not defined, else ignore -1 or use processTimeout
+          (engine.processTimeout ?? 30e3) < 0
+            ? 0
+            : engine.processTimeout ?? 30e3
+        );
+        // try catch the attempt and throw to errorHandler with errors (to close connection)
+        try {
+          // attempt to process the block
+          await processListenerBlock(
+            // blockNumber being processed...
+            +block.number,
+            // the chainId it belongs to...
+            +block.chainId,
+            // process validOps [for this chain] each tick to associate any new syncs (cache and invalidate?)
+            await getValidSyncOps(),
+            // pass through the config...
+            engine.flags.collectBlocks,
+            engine.flags.collectTxReceipts,
+            engine.flags.silent,
+            // pass through the length of the queue for reporting and for deciding if we should be saving or not
+            ingestor.blockQueueLength - 1, // -1 to offset the block we're currently printing
+            // helper parts to pass through entities, block & receipts...
+            engine.indexedMigrations,
+            engine.indexedMigrationEntities, // <-- TODO: reimplement this.
+            // pass in the block and receipt data
+            {
+              // this is the full block with TransactionResponses
+              block: block.block,
+              // this is an index of all receipts against their txHash
+              receipts: block.receipts.reduce((receipts, receipt) => {
+                // index the receipts against their hash
+                receipts[receipt.transactionHash] = receipt;
 
-            // return all indexed receipts
-            return receipts;
-          }, {}),
+                // return all indexed receipts
+                return receipts;
+              }, {}),
+            }
+          );
+        } catch (e) {
+          // reject on the handler (this will close the connection)
+          errorHandler.reject(e);
+        } finally {
+          // we've processed or thrown on the block - no need to timeout
+          clearTimeout(timeout);
         }
-      );
+      }
     },
     // return an object of all available rpc urls
     rpcUrls: Object.keys(syncProviders).reduce((rpcUrls, chainId) => {
@@ -871,7 +920,7 @@ export async function createListeners(
       await halt(controls, attached);
       // stop processing on the ingestor but keep the queue intact
       await ingestor.stopProcessing();
-      // resolve the error handler without throwing
+      // resolve the error handler without throwing (will need to recreate controls to restart)
       errorHandler.resolve();
     },
     // hard close (this will exit the process after completing all closing procedures)

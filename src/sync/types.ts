@@ -66,11 +66,7 @@ export type Engine = {
   opSyncs?: Record<string, Sync>;
   handlers?: Handlers;
   events?: SyncEvent[];
-  blockQueue?: {
-    chainId: number;
-    number: number;
-    asyncParts: Promise<boolean>;
-  }[];
+  processTimeout?: number;
   indexedMigrations?: Record<string, Migration[]>;
   indexedMigrationEntities?: Record<
     string,
@@ -192,6 +188,8 @@ export type SyncConfig = {
   silent?: boolean;
   // set readOnly on the engine via config
   readOnly?: boolean;
+  // set the max time a process (block handler) can run for (in ms)
+  processTimeout?: number;
   // the number of block workers to use for processing (sets concurrency for ingestor block processing)
   numBlockWorkers?: number;
   // the number of transaction workers to use for processing (sets concurrency for ingestor transaction processing)

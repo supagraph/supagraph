@@ -92,6 +92,7 @@ export const sync = async ({
   cleanup = false,
   silent = false,
   readOnly = false,
+  processTimeout = 30e3,
   numBlockWorkers = undefined,
   numTransactionWorkers = undefined,
   printIngestionErrors = false,
@@ -115,6 +116,7 @@ export const sync = async ({
   cleanup?: boolean;
   silent?: boolean;
   readOnly?: boolean;
+  processTimeout?: number;
   // the number of block workers to use for processing (sets concurrency for ingestor block processing)
   numBlockWorkers?: number;
   // the number of transaction workers to use for processing (sets concurrency for ingestor transaction processing)
@@ -143,6 +145,8 @@ export const sync = async ({
   engine.promiseQueue = promiseQueue;
   // set readOnly option against the engine immediately
   engine.readOnly = config.readOnly ?? readOnly;
+  // set the max time a process (block handler) can run for (in ms)
+  engine.processTimeout = config.processTimeout ?? processTimeout;
   // set concurrency according to config/fallback to 100
   engine.concurrency = config.concurrency ?? 100;
   // collect each events abi iface
@@ -189,7 +193,7 @@ export const sync = async ({
 
   // attempt to pull the latest data
   try {
-    // await the lock check
+    // await the lock check - this call will fill engine.latestBlock{}
     await checkLocks(chainIds, startTime);
 
     // check if we're globally including, or individually including the blocks
@@ -236,12 +240,16 @@ export const sync = async ({
       // create an ingestor to start buffering blocks+receipts as they are emitted
       ingestor = await createIngestor(
         // control how many reqs we make concurrently
-        numBlockWorkers,
-        numTransactionWorkers,
-        // to enable easier debug set printIngestionErrors to print dumps and logs
+        config ? config.numBlockWorkers ?? numBlockWorkers : numBlockWorkers,
+        config
+          ? config.numTransactionWorkers ?? numTransactionWorkers
+          : numTransactionWorkers,
+        // to enable easier debug set printIngestionErrors to print ongoing dumps and logs
         config
           ? config.printIngestionErrors ?? printIngestionErrors
-          : printIngestionErrors
+          : printIngestionErrors,
+        // pass in the error handler - this will be associated with all listeners and the ingestor stop process when we createListeners
+        errorHandler
       );
 
       // start workers to begin processing any blocks added to the incoming stream
@@ -348,8 +356,8 @@ export const sync = async ({
       // set syncing to false - we never opened the listeners
       engine.syncing = false;
     } else {
-      // set the processing mechanism going by switching active file to trigger line reader
-      setImmediate(() => ingestor.startProcessing());
+      // start handling block ingestion calling and calling appropriate sync handlers
+      setImmediate(() => ingestor?.startProcessing?.());
     }
 
     // return a summary of the operation to the caller (and the close() fn if we called sync({...}) with listen: true)

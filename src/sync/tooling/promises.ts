@@ -30,61 +30,73 @@ export const processPromiseQueue = async (
   // construct a reqStack so that we're only processing x reqs at a time
   const reqStack: (() => Promise<any>)[] = [];
 
-  // iterate the queue and place each promise as a response of a fn callback
-  for (const key of Object.keys(queue)) {
-    // get the promise
-    const promise = queue[key];
-    // keep trying to process the given promise -- if the handler throws this could cause an infinite load situation
-    reqStack.push(async function keepTrying(attempts = 0) {
-      try {
-        // wait for the function/promise to resolve
-        if (typeof (promise as Promise<unknown>).then === "function") {
-          queue[key] = await Promise.resolve(promise);
-        } else if (typeof promise === "function") {
-          queue[key] = await (
-            promise as (stack: (() => Promise<any>)[]) => Promise<unknown>
-          )(reqStack);
+  // return a promise to resolve the stack
+  return new Promise<void>((resolve, reject) => {
+    // iterate the queue and place each promise as a response of a fn callback
+    for (const key of Object.keys(queue)) {
+      // get the promise
+      const promise = queue[key];
+      // keep trying to process the given promise -- if the handler throws this could cause an infinite load situation limit with retries
+      reqStack.push(async function keepTrying(attempts = 0) {
+        try {
+          // wait for the function/promise to resolve
+          if (typeof (promise as Promise<unknown>).then === "function") {
+            queue[key] = await Promise.resolve(promise);
+          } else if (typeof promise === "function") {
+            queue[key] = await (
+              promise as (stack: (() => Promise<any>)[]) => Promise<unknown>
+            )(reqStack);
+          }
+        } catch (e) {
+          // if theres an error - restack upto 10 times before throwing in outer context
+          if (attempts < 3) {
+            // print the error
+            if (!engine.flags.silent) console.log(e);
+            // make another attempt
+            reqStack.push(async () => keepTrying(attempts + 1));
+          } else {
+            // throw the error externally
+            throw e;
+          }
         }
-      } catch (e) {
-        // if theres an error - restack upto 10 times before throwing in outer context
-        if (attempts < 10) {
-          // make another attempt
-          reqStack.push(async () => keepTrying(attempts + 1));
-        } else {
-          // throw the error externally
-          throw e;
-        }
-      }
-    });
-  }
-
-  // pull from the reqStack and process...
-  while (reqStack.length > 0) {
-    // process n requests concurrently and wait for them all to resolve
-    const consec = [];
-
-    // pop up to 'concurrency' number of requests
-    for (
-      let i = 0;
-      // we can't take less than one item from the stack
-      i < (concurrency || engine.concurrency || 1) && reqStack.length > 0;
-      // incr index to position for loop
-      i += 1
-    ) {
-      // shift from reqStack to consec to process in batches
-      consec.push(reqStack.shift());
+      });
     }
 
-    // run through all promises until we come to a stop
-    await Promise.all(consec.map(async (fn) => fn())).catch((e) => {
-      console.log(e);
-      // throw in context, we want to trigger an error in parent and stop processing, no handler should error 10 times.
-      throw e;
-    });
-  }
+    // resolve the resolution of the promise stack
+    resolve(
+      Promise.resolve()
+        .then(async () => {
+          // pull from the reqStack and process...
+          while (reqStack.length > 0) {
+            // process n requests concurrently and wait for them all to resolve
+            const consec = [];
 
-  // remove all from queue on cleanup
-  if (cleanup) {
-    queue.length = 0;
-  }
+            // pop up to 'concurrency' number of requests
+            for (
+              let i = 0;
+              // we can't take less than one item from the stack
+              i < (concurrency || engine.concurrency || 1) &&
+              reqStack.length > 0;
+              // incr index to position for loop
+              i += 1
+            ) {
+              // shift from reqStack to consec to process in batches
+              consec.push(reqStack.shift());
+            }
+
+            // run through all promises until we come to a stop
+            await Promise.all(consec.map(async (fn) => fn())).catch((e) => {
+              // throw in context, we want to trigger an error in parent and stop processing, no handler should error 10 times.
+              reject(e);
+            });
+          }
+        })
+        .then(() => {
+          // remove all from queue on cleanup
+          if (cleanup) {
+            queue.length = 0;
+          }
+        })
+    );
+  });
 };
