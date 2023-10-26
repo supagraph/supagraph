@@ -394,7 +394,7 @@ export class Ingestor {
               };
             })
         );
-        // throw to wait 1 seconds
+        // throw to wait some seconds
         throw new Error("We need to wait for the transactions to be processed");
       } else {
         // if we cancel this on the outside propagate through
@@ -418,7 +418,11 @@ export class Ingestor {
                     ]
                   );
                 } else {
-                  reject();
+                  reject(
+                    new Error(
+                      "We need to wait for the transactions to be processed"
+                    )
+                  );
                 }
               });
             })
