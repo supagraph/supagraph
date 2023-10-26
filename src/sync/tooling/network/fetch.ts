@@ -6,10 +6,11 @@ import { SyncEvent } from "@/sync/types";
 
 import { getEngine } from "@/sync/tooling/persistence/store";
 import { readJSON, saveJSON } from "@/sync/tooling/persistence/disk";
+import { getRandomProvider } from "@/sync/tooling/network/providers";
 
 import { processPromiseQueue } from "@/sync/tooling/promises";
 
-import { getRandomProvider } from "@/sync/tooling/network/providers";
+import { getBlockByNumber } from "@/sync/tooling/network/blocks";
 import { getTransactionReceipt } from "@/sync/tooling/network/transactions";
 
 // this is only managing about 20k blocks before infura gets complainee
@@ -42,16 +43,21 @@ export const attemptFnCall = async <T extends Record<string, any>>(
             syncProviders[dets.chainId].connection.url,
           ]);
 
-    // wrap call to get receipt from custom handler
+    // wrap call to get block/receipt from custom handler
     const call: (hash: unknown) => Promise<T> =
       fn === "getTransactionReceipt"
-        ? async (hash: unknown) =>
+        ? // direct through getTransactionReceipt
+          async (hash: unknown) =>
             getTransactionReceipt(
               provider,
               hash as string
             ) as unknown as Promise<T>
-        : async (hash: unknown) =>
-            provider[fn](hash as string) as unknown as Promise<T>;
+        : fn === "getBlock"
+        ? // direct through getBlockByNumber
+          async (num: unknown) =>
+            getBlockByNumber(provider, num as number) as unknown as Promise<T>
+        : // noop (unreachable)
+          async () => undefined;
 
     // attempt to get the block from the connected provider first
     call(dets.data[prop])
@@ -106,8 +112,23 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
   const result = new Set<string>();
   // place the operations into a stack and resolve them x at a time
   const stack: ((reqStack: (() => Promise<any>)[]) => Promise<void>)[] = [];
-  // once processed place into the results
-  const processed = (val) => {
+  // attempt the fn call against the dets (this will always result in an eventual call to processed)
+  const makeFnCall = (
+    dets: SyncEvent,
+    attempts: number,
+    resolve: (v: unknown) => void,
+    reject: (e: any) => void
+  ) =>
+    // attempt the appropriate fn call and resolve/catch any errors
+    attemptFnCall<T>(syncProviders, type, dets, prop, fn, resProp, attempts)
+      .then((respType) => {
+        resolve(respType);
+      })
+      .catch((errType) => {
+        reject(errType);
+      });
+  // once fetched place results hash into the results
+  const processed = (val: Block | TransactionReceipt) => {
     // count successfully fetched items
     if (val)
       result.add(
@@ -122,9 +143,11 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
     // push function to place the selected resProp at the requested prop
     stack.push(async (reqStack) => {
       await new Promise<unknown>((resolve, reject) => {
+        // first attempt to read the content from disk
         readJSON(
           type,
           `${dets.chainId}-${
+            // when dealing with blocks we need to ensure the blockNumber is base 10
             type === "blocks"
               ? +dets.blockNumber
               : typeof dets.data === "object"
@@ -134,55 +157,29 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
         )
           .then((data) => {
             if (data) {
-              try {
-                // spread the val
-                if (resProp === "from") {
-                  dets.from = data.from as string;
-                } else {
-                  // set the value by mutation
-                  dets.timestamp = data.timestamp as number;
-                }
-                resolve(data);
-              } catch {
-                attemptFnCall<T>(
-                  syncProviders,
-                  type,
-                  dets,
-                  prop,
-                  fn,
-                  resProp,
-                  0
-                )
-                  .then((respType) => {
-                    resolve(respType);
-                  })
-                  .catch((errType) => {
-                    reject(errType);
-                  });
-              }
+              // store the requested resProp against the instance
+              dets[resProp as string] = data[
+                resProp as string
+              ] as (typeof dets)[typeof resProp];
+              // convert timestamp to base 10 number
+              if (resProp === "timestamp")
+                dets[resProp as string] = +dets[resProp as string];
+              // resolve the discovered data
+              resolve(data);
             } else {
-              attemptFnCall<T>(syncProviders, type, dets, prop, fn, resProp, 0)
-                .then((respType) => {
-                  resolve(respType);
-                })
-                .catch((errType) => {
-                  reject(errType);
-                });
+              // make the fn call to get the block/transaction
+              throw new Error("Missing block data fetch new...");
             }
           })
           .catch(() => {
-            attemptFnCall<T>(syncProviders, type, dets, prop, fn, resProp, 0)
-              .then((respType) => {
-                resolve(respType);
-              })
-              .catch((errType) => {
-                reject(errType);
-              });
+            // if anything failed during read, attempt the fn call for the first time (attempts: 0)
+            makeFnCall(dets, 0, resolve, reject);
           });
       })
         .catch(
+          // set up a routine to catch and retry recursively - we always want to eventually resolve these
           (function retry(attempts) {
-            // logging if we keep attempting and we're not getting anything...
+            // log if we keep attempting and we're not getting anything...
             if (!silent && attempts % 10 === 0) {
               console.log(
                 `Made ${attempts} attempts to get: ${dets.chainId}::${
@@ -191,27 +188,17 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
               );
             }
 
-            // return the error handler (recursive stacking against the reqStack)
+            // return the error handler (recursively stacking against the reqStack to avoid building too much off a callstack)
             return (): void => {
+              // push another task to the reqStack (and resolve current task)
               reqStack.push(() =>
-                attemptFnCall<T>(
-                  syncProviders,
-                  type,
-                  dets,
-                  prop,
-                  fn,
-                  resProp,
-                  attempts
-                )
-                  // try again but up the attempts on error
-                  .catch(retry(attempts + 1))
-                  // finalised with processed
-                  .then(processed)
+                // make the fnCall again and incr the attempts
+                makeFnCall(dets, attempts, processed, retry(attempts + 1))
               );
             };
           })(1)
         )
-        // finalise first attempt with processed
+        // finalise first attempt with processed (later attempts are piped through processed() on resolve())
         .then(processed);
     });
   }

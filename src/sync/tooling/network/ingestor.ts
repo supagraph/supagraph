@@ -96,9 +96,6 @@ export class Ingestor {
   // Transactions which have been fetched and are ready to use in the receipts portion on the blockSaveStream
   private transactionReadyBuffer: Record<number, Record<string, TxData>> = {};
 
-  // Keep track of the number of blocks as they enter and exit the saveStream
-  private pendingBlockCount: number = 0;
-
   // The pool of workers who are collecting block information
   private blockWorkerPool: Promise<void>[];
 
@@ -165,9 +162,10 @@ export class Ingestor {
 
   // Expose the length of the blockQueue
   public get blockQueueLength() {
-    // count all places that blocks can be (pendingBlockCount will keep track of what is present in the active buffer)
+    // count all places that blocks can be (the sum of this is always the queue length)
     return (
-      this.pendingBlockCount +
+      this.blockSaveStream1.length +
+      this.blockSaveStream2.length +
       this.incomingBlockQueue.length +
       this.outgoingBlockQueue.length
     );
@@ -354,8 +352,6 @@ export class Ingestor {
         block: blockData.block,
         receipts: blockData.receipts,
       });
-      // incr the pending line count (decr when we read it)
-      this.pendingBlockCount += 1;
       // delete the buffered entry for gc to collect
       delete this.blockReadyBuffer[block.chainId]?.[block.number];
     });
@@ -659,8 +655,12 @@ export class Ingestor {
     } else {
       // mark as running
       this.isDoubleBufferRunning = true;
+      // check the length of the active array before switching away from it - no need if we're on 0 still
+      const activeArray = this.blockSaveStreamSwitch
+        ? this.blockSaveStream1
+        : this.blockSaveStream2;
       // if blocks have been added to the inactive file, switch and read (else just timeout for another second)
-      if (this.pendingBlockCount > 0) {
+      if (activeArray.length > 0) {
         // mark that we've entered swapping mode (temp lock)
         this.swapping = true;
 
@@ -710,9 +710,6 @@ export class Ingestor {
       } catch (e) {
         // log errors but dont stop (errors should be caught by the provided withBlock fn)
         if (!this.silent) console.error(e);
-      } finally {
-        // remove from count
-        this.pendingBlockCount -= 1;
       }
     }
 
@@ -841,7 +838,7 @@ export async function createIngestor(
             engine.flags.collectTxReceipts,
             engine.flags.silent,
             // pass through the length of the queue for reporting and for deciding if we should be saving or not
-            ingestor.blockQueueLength - 1, // -1 to offset the block we're currently printing
+            ingestor.blockQueueLength,
             // helper parts to pass through entities, block & receipts...
             engine.indexedMigrations,
             engine.indexedMigrationEntities, // <-- TODO: reimplement this.

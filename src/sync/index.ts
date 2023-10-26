@@ -383,7 +383,10 @@ export const sync = async ({
       latestBlocksByChain: Object.keys(engine.latestEntity).reduce(
         (all, chainId) => ({
           ...all,
-          [chainId]: +engine.latestEntity[+chainId].latestBlock,
+          [chainId]: +(
+            engine.latestEntity[+chainId].latestBlock ||
+            engine.latestBlocks[chainId].number
+          ),
         }),
         {}
       ),
