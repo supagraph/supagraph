@@ -529,7 +529,9 @@ export class Ingestor {
       }
 
       // record the incoming in the outgoing track to order the async results
-      this.outgoingBlockQueue.push(block);
+      if (this.outgoingBlockQueue.indexOf(block) === -1) {
+        this.outgoingBlockQueue.push(block);
+      }
 
       // wrap this so that we can catch errors for retry attempts - these should always succeed
       try {

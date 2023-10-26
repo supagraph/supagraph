@@ -200,7 +200,7 @@ export const processCallback = async (
         transactions: [
           ...block.transactions.map((tx: { hash: any }) => {
             // take a copy of each tx to drop assoc
-            return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
+            return tx?.hash ? JSON.parse(JSON.stringify(tx)) : tx;
           }),
         ],
       });
@@ -248,7 +248,7 @@ export const processCallback = async (
         transactions: [
           ...block.transactions.map((tx: { hash: any }) => {
             // take a copy of each tx to drop assoc
-            return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
+            return tx?.hash ? JSON.parse(JSON.stringify(tx)) : tx;
           }),
         ],
       });
@@ -532,7 +532,7 @@ export const processListenerBlock = async (
       transactions: [
         ...block.transactions.map((tx: { hash: any }) => {
           // take a copy of each tx to drop assoc to global mem block
-          return tx.hash ? JSON.parse(JSON.stringify(tx)) : tx;
+          return tx?.hash ? JSON.parse(JSON.stringify(tx)) : tx;
         }),
       ],
     });
@@ -666,12 +666,12 @@ export const processListenerBlock = async (
                 JSON.stringify({
                   ...tx,
                   ...(collectTxReceipts || op.opts?.collectTxReceipts
-                    ? receipts[tx.hash]
+                    ? receipts[tx?.hash]
                     : ({} as unknown as TransactionReceipt)),
                 })
               ),
               // onTx called after all other events for this tx
-              txIndex: receipts[tx.hash].transactionIndex,
+              txIndex: receipts[tx?.hash].transactionIndex,
               // set really big to make sure onTx is sorted to the end of the tx's events
               logIndex: 999999999999999,
             });
