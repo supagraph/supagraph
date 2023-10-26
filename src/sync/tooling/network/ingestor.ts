@@ -441,8 +441,9 @@ export class Ingestor {
       return new Promise((resolve, reject) => {
         // if we're waiting on resolution try again, else throw
         if (
+          e &&
           e.toString() ===
-          "Error: We need to wait for the transactions to be processed"
+            "Error: We need to wait for the transactions to be processed"
         ) {
           setTimeout(() => {
             try {
@@ -800,7 +801,7 @@ export async function createIngestor(
     // place a withBlock function to handle processing
     withBlock: async (ingestor, block) => {
       // with next block after the catchup sync...
-      if (engine.latestBlocks[+block.chainId].number < block.number) {
+      if (+engine.latestBlocks[+block.chainId].number < +block.number) {
         // kill this before moving on - but use to end process if we spend too long here (we can get trapped on the awaitPromiseQueue)
         const timeout = setTimeout(
           () => {
