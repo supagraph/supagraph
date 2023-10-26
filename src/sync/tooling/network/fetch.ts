@@ -106,6 +106,16 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
   const result = new Set<string>();
   // place the operations into a stack and resolve them x at a time
   const stack: ((reqStack: (() => Promise<any>)[]) => Promise<void>)[] = [];
+  // once processed place into the results
+  const processed = (val) => {
+    // count successfully fetched items
+    if (val)
+      result.add(
+        (val as Block).hash || (val as TransactionReceipt).transactionHash
+      );
+
+    return val;
+  };
 
   // iterate the events and attempt to pull the associated block/transaction
   for (const dets of filtered) {
@@ -116,7 +126,7 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
           type,
           `${dets.chainId}-${
             type === "blocks"
-              ? parseInt(`${dets.blockNumber}`).toString(10)
+              ? +dets.blockNumber
               : typeof dets.data === "object"
               ? dets.data[prop]
               : dets.data
@@ -192,19 +202,17 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
                   fn,
                   resProp,
                   attempts
-                ).catch(retry(attempts + 1))
+                )
+                  // try again but up the attempts on error
+                  .catch(retry(attempts + 1))
+                  // finalised with processed
+                  .then(processed)
               );
             };
           })(1)
         )
-        .then((val) => {
-          // count successfully fetched items
-          result.add(
-            (val as Block).hash || (val as TransactionReceipt).transactionHash
-          );
-
-          return val;
-        });
+        // finalise first attempt with processed
+        .then(processed);
     });
   }
 
