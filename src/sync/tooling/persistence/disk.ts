@@ -8,15 +8,12 @@ import { Event } from "ethers";
 import csvParser from "csv-parser";
 import csvWriter from "csv-write-stream";
 
+// retrieve engine from persistence store
+import { getEngine } from "@/sync/tooling/persistence/store";
+
 // types for sync events
 import { SyncEvent, SyncStage } from "@/sync/types";
-import { toEventData } from "@/utils";
-
-// working directory of the calling project or tmp if in prod
-export const cwd =
-  process.env.NODE_ENV === "development"
-    ? `${process.cwd()}/data/`
-    : "/tmp/data-"; // we should use /tmp/ on prod for an ephemeral store during the execution of this process (max 512mb of space on vercel)
+import { cwd, toEventData } from "@/utils";
 
 // check a file exists
 export const exists = async (
@@ -289,19 +286,17 @@ export const saveLatestRunCapture = async (
 };
 
 // process the sorted events via the sync handler callbacks
-export const doCleanup = async (
-  events: SyncEvent[],
-  silent?: boolean,
-  start?: keyof typeof SyncStage | false,
-  stop?: keyof typeof SyncStage | false
-) => {
+export const doCleanup = async (events: SyncEvent[]) => {
+  // access engine for flags
+  const engine = await getEngine();
   // check if we're cleaning up in this sync
   if (
-    (!start || SyncStage[start] <= SyncStage.process) &&
-    (!stop || SyncStage[stop] >= SyncStage.process)
+    (!engine.flags.start ||
+      SyncStage[engine.flags.start] <= SyncStage.process) &&
+    (!engine.flags.stop || SyncStage[engine.flags.stop] >= SyncStage.process)
   ) {
     // log that we're starting
-    if (!silent) process.stdout.write(`Cleanup tmp storage `);
+    if (!engine.flags.silent) process.stdout.write(`Cleanup tmp storage `);
 
     // iterate the events and delete all blocks and txs from this run
     await Promise.all(
@@ -338,10 +333,10 @@ export const doCleanup = async (
       })
     ).catch(() => {
       // attempt the cleanup again - if everything is clean we should return true from deleteJSON
-      doCleanup(events, silent, start, stop);
+      doCleanup(events);
     });
   }
 
   // mark as complete in stdout
-  if (!silent) process.stdout.write("✔\n");
+  if (!engine.flags.silent) process.stdout.write("✔\n");
 };

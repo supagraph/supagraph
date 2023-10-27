@@ -34,7 +34,7 @@ export async function addSync<T extends Record<string, unknown>>(
           collectTxReceipts?: boolean;
         };
         address?: string;
-        eventAbi?: string | ethers.Contract["abi"];
+        events?: string | ethers.Contract["abi"];
         against?: Sync[];
       },
   startBlock?: number | "latest",
@@ -49,7 +49,7 @@ export async function addSync<T extends Record<string, unknown>>(
     collectTxReceipts?: boolean;
   },
   address?: string,
-  eventAbi?: string | ethers.Contract["abi"],
+  events?: string | ethers.Contract["abi"],
   against?: Sync[]
 ): Promise<
   (
@@ -77,7 +77,6 @@ export async function addSync<T extends Record<string, unknown>>(
     params = {
       chainId: chainIdOrParams!,
       address: address!,
-      eventAbi: eventAbi!,
       eventName: eventName!,
       provider: provider!,
       startBlock: startBlock!,
@@ -89,6 +88,7 @@ export async function addSync<T extends Record<string, unknown>>(
         // overide defaults with provided opts
         ...(opts || {}),
       },
+      events: events!,
       handlers: handlers!,
       onEvent: onEvent!,
     };
@@ -97,7 +97,6 @@ export async function addSync<T extends Record<string, unknown>>(
     params = {
       chainId: chainIdOrParams.chainId!,
       address: chainIdOrParams.address!,
-      eventAbi: chainIdOrParams.eventAbi!,
       eventName: chainIdOrParams.eventName!,
       provider: chainIdOrParams.provider!,
       startBlock: chainIdOrParams.startBlock!,
@@ -109,6 +108,7 @@ export async function addSync<T extends Record<string, unknown>>(
         // overide defaults with provided opts
         ...(chainIdOrParams.opts || {}),
       },
+      events: chainIdOrParams.events!,
       handlers: chainIdOrParams.handlers!,
       onEvent: chainIdOrParams.onEvent!,
     };
@@ -131,8 +131,8 @@ export async function addSync<T extends Record<string, unknown>>(
   }
 
   // copy the eventAbis into place
-  if (typeof params.eventAbis === "string") {
-    params.eventAbis = engine.eventAbis[params.eventAbis];
+  if (typeof params.events === "string") {
+    params.events = engine.eventAbis[params.events];
   }
 
   // get the checksum address
@@ -140,6 +140,14 @@ export async function addSync<T extends Record<string, unknown>>(
     (params.address &&
       `${params.chainId.toString()}-${getAddress(params.address)}`) ||
     params.chainId.toString();
+
+  // when provided an address - we're mapping a contract...
+  if (params.address && params.events) {
+    // record the event interface so we can reconstruct args to feed to callback
+    engine.eventIfaces[`${cbAddress}-${params.eventName}`] =
+      engine.eventIfaces[`${cbAddress}-${params.eventName}`] ||
+      new ethers.utils.Interface(params.events);
+  }
 
   // with handlers defined, place handling
   if (engine.handlers) {
@@ -189,7 +197,7 @@ export async function addSync<T extends Record<string, unknown>>(
     Store.setChainId(params.chainId);
 
     // pull all syncs to this point
-    const { events } = await getNewSyncEvents(
+    const { events: syncEvents } = await getNewSyncEvents(
       [params],
       engine.flags?.collectBlocks || params.opts?.collectBlocks,
       engine.flags?.collectTxReceipts || params.opts?.collectTxReceipts,
@@ -204,7 +212,7 @@ export async function addSync<T extends Record<string, unknown>>(
     });
 
     // append and sort the pending events
-    await engine.appendEvents(events, true);
+    await engine.appendEvents(syncEvents, true);
   }
 
   // Return the event handler to constructing context
@@ -349,8 +357,8 @@ export const setSyncs = async (
         Object.keys(mapping || []).map(async (eventName) => {
           await addSync({
             chainId: syncOp.chainId ?? (name as unknown as number),
+            events,
             eventName,
-            eventAbi: events,
             address: syncOp.address,
             startBlock: syncOp.startBlock,
             endBlock: syncOp.endBlock,

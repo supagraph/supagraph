@@ -325,25 +325,20 @@ export const processCallback = async (
 };
 
 // Process the sorted events via the sync handler callbacks
-export const processEvents = async (
-  chainIds: Set<number>,
-  listen: boolean,
-  cleanup?: boolean,
-  silent?: boolean,
-  start?: keyof typeof SyncStage | false,
-  stop?: keyof typeof SyncStage | false
-) => {
+export const processEvents = async () => {
   // open a checkpoint on the db...
   const engine = await getEngine();
+  // get all chainIds for defined networks
+  const { chainIds } = await getNetworks();
 
   // copy prcessed events here
   const processed: SyncEvent[] = [];
 
   // check if we're finalising the process in this sync
   if (
-    engine.events.length &&
-    (!start || SyncStage[start] <= SyncStage.process) &&
-    (!stop || SyncStage[stop] >= SyncStage.process)
+    (!engine.flags.start ||
+      SyncStage[engine.flags.start] <= SyncStage.process) &&
+    (!engine.flags.stop || SyncStage[engine.flags.stop] >= SyncStage.process)
   ) {
     // store the updates until we've completed the call
     const chainUpdates: string[] = [];
@@ -352,7 +347,7 @@ export const processEvents = async (
     engine?.stage?.checkpoint();
 
     // log that we're starting
-    if (!silent) process.stdout.write(`\n--\n\nEvents processed `);
+    if (!engine.flags.silent) process.stdout.write(`\n--\n\nEvents processed `);
 
     // iterate the sorted events and process the callbacks with the given args (sequentially - event loop to process all callbacks)
     while (engine.events.length) {
@@ -408,13 +403,13 @@ export const processEvents = async (
     }
 
     // print the number of processed events
-    if (!silent) process.stdout.write(`(${processed.length}) `);
+    if (!engine.flags.silent) process.stdout.write(`(${processed.length}) `);
 
     // clear the promiseQueue for next iteration
     engine.promiseQueue.length = 0;
 
     // mark after we end
-    if (!silent) process.stdout.write("✔\nEntities stored ");
+    if (!engine.flags.silent) process.stdout.write("✔\nEntities stored ");
 
     // commit the checkpoint on the db...
     await engine?.stage?.commit();
@@ -423,25 +418,25 @@ export const processEvents = async (
     engine.newDb = false;
 
     // after commit all events are stored in db
-    if (!silent) process.stdout.write("✔\nPointers updated ");
+    if (!engine.flags.silent) process.stdout.write("✔\nPointers updated ");
 
     // update the pointers to reflect the latest sync
-    await updateSyncPointers(processed, listen, chainUpdates);
+    await updateSyncPointers(processed, chainUpdates);
 
     // finished after updating pointers
-    if (!silent) process.stdout.write("✔\n");
+    if (!engine.flags.silent) process.stdout.write("✔\n");
 
     // do cleanup stuff...
-    if (cleanup) {
+    if (engine.flags.cleanup) {
       // rm the tmp dir between runs
-      await doCleanup(processed, silent, start, stop);
+      await doCleanup(processed);
     }
 
     // place some space before the updates
-    if (!silent) console.log("\n--\n");
+    if (!engine.flags.silent) console.log("\n--\n");
 
     // log each of the chainUpdate messages
-    if (!silent)
+    if (!engine.flags.silent)
       chainUpdates.forEach((msg) => {
         console.log(msg);
       });
@@ -902,7 +897,6 @@ export const processListenerBlock = async (
         await updateSyncPointers(
           // these events follow enough to pass as SyncEvents
           processed as unknown as SyncEvent[],
-          true,
           []
         );
 

@@ -31,6 +31,7 @@ import {
 
 // Import sortSyncs method from config
 import { setSchedule, sortSyncs } from "@/sync/config";
+import { checkSchedule } from "./tooling/schedule";
 
 // Export multicall contract factory and call wrapper
 export {
@@ -264,22 +265,36 @@ export const sync = async ({
         errorPromise,
         onError
       );
+    } else if (schedule) {
+      // keep track of when we're running so we don't overlap calls (we'll catchup next call if we missed something)
+      let runningSchedule = false;
+      // check now to trigger save of last run time
+      await checkSchedule(new Date().getTime() / 1e3);
+      // set interval to check schedule
+      const interval = setInterval(() => {
+        // get now, we'll use this to move to the minute mark and call the scheduler
+        const now = new Date();
+        // wait until the minute reaches 0
+        const secondsUntilNextMinute = 60 - now.getSeconds();
+        // check the schedule on the next minute mark
+        setTimeout(() => {
+          // if its not currently being checked, check it now...
+          if (!runningSchedule) {
+            // check the schedule against the current time
+            checkSchedule(new Date().getTime() / 1e3).then(() => {
+              // return to false for next call in 1 min
+              runningSchedule = false;
+            });
+          }
+        }, secondsUntilNextMinute * 1e3);
+      }, 60e3); // check once a minute
+
+      // close the interval on soft/hard close (same action for now)
+      listeners = [
+        async () => clearInterval(interval),
+        async () => clearInterval(interval),
+      ];
     }
-
-    // pull all syncs to this point (supply engine.syncs directly to gather full list of events)
-    const { events } = await getNewSyncEvents(
-      engine.syncs,
-      collectAnyBlocks,
-      collectAnyTxReceipts,
-      collectBlocks,
-      collectTxReceipts,
-      cleanup,
-      start,
-      silent
-    );
-
-    // apply any migrations that fit the event range
-    await applyMigrations(migrations, config, events);
 
     // set the appendEvents against the engine to allow events to be appended during runtime (via addSync)
     engine.appendEvents = async (prcEvents: SyncEvent[], opSilent: boolean) => {
@@ -318,27 +333,80 @@ export const sync = async ({
       );
     };
 
-    // sort the pending events
-    await engine.appendEvents(events, engine.flags.silent ?? false);
+    // expose all logic to get new events since last sync
+    engine.catchup = async (): Promise<SyncResponse> => {
+      try {
+        // get all chainIds for current set of defined networks
+        const {
+          chainIds: currentChainIds,
+          syncProviders: currentSyncProviders,
+        } = await getNetworks();
 
-    // process the results
-    const newEventsTotal = await processEvents(
-      chainIds,
-      listen,
-      cleanup,
-      silent,
-      start,
-      stop
-    );
+        // get the latest block for each of these
+        await Promise.all(
+          [...currentChainIds].map(async (chainId) => {
+            // toBlock is always "latest" from when we collect the events
+            engine.latestBlocks[chainId] = await currentSyncProviders[
+              chainId
+            ].getBlock("latest");
+          })
+        );
 
-    // update storage with any new syncOps added in the sync
-    if (engine.handlers && engine.syncOps.meta) {
-      // record the new syncs to db (this will replace the current entry)
-      engine.syncOps.meta = await updateSyncsOpsMeta(
-        engine.syncOps.meta,
-        engine.syncs
-      );
-    }
+        // pull all syncs to this point (supply engine.syncs directly to gather full list of events)
+        const { events } = await getNewSyncEvents(
+          engine.syncs,
+          collectAnyBlocks,
+          collectAnyTxReceipts,
+          collectBlocks,
+          collectTxReceipts,
+          cleanup,
+          start,
+          silent
+        );
+
+        // apply any migrations that fit the event range
+        await applyMigrations(migrations, config, events);
+
+        // sort the pending events
+        await engine.appendEvents(events, engine.flags.silent ?? false);
+
+        // process the events and get back a count on how many we encountered
+        const processed = await processEvents();
+
+        // update storage with any new syncOps added in the sync
+        if (engine.handlers && engine.syncOps.meta) {
+          // record the new syncs to db (this will replace the current entry)
+          engine.syncOps.meta = await updateSyncsOpsMeta(
+            engine.syncOps.meta,
+            engine.syncs
+          );
+        }
+
+        // process the events in the queue
+        return {
+          events,
+          processed,
+        };
+      } catch (e) {
+        // assign error to engine
+        engine.error = e;
+
+        // process error by releasing the locks
+        if (e.toString() !== "DB is locked") {
+          await onError(e, async () => {
+            await releaseSyncPointerLocks(chainIds);
+          });
+        }
+
+        // there was an error...
+        return {
+          error: e.toString(),
+        };
+      }
+    };
+
+    // run the catchup event
+    const newEvents = await engine.catchup();
 
     // record when we finished the sync operation
     const endTime = new Date().getTime();
@@ -363,13 +431,14 @@ export const sync = async ({
     // return a summary of the operation to the caller (and the close() fn if we called sync({...}) with listen: true)
     return {
       syncOps: engine.syncs.length,
-      events: newEventsTotal,
       runTime: Number((endTime - startTime) / 1000).toPrecision(4),
       chainIds: Array.from(chainIds),
+      processed: newEvents.processed,
       eventsByChain: Array.from(chainIds).reduce(
         (all, chainId) => ({
           ...all,
-          [chainId]: events.filter((vals) => vals.chainId === chainId).length,
+          [chainId]: newEvents.events.filter((vals) => vals.chainId === chainId)
+            .length,
         }),
         {}
       ),
@@ -383,10 +452,7 @@ export const sync = async ({
       latestBlocksByChain: Object.keys(engine.latestEntity).reduce(
         (all, chainId) => ({
           ...all,
-          [chainId]: +(
-            engine.latestEntity[+chainId].latestBlock ||
-            engine.latestBlocks[chainId].number
-          ),
+          [chainId]: +engine.latestBlocks[chainId].number,
         }),
         {}
       ),

@@ -6,6 +6,7 @@ import {
 } from "@ethersproject/providers";
 import { ethers } from "ethers";
 
+import { cwd } from "@/utils";
 import { toEventData } from "@/utils/toEventData";
 
 import { getEngine } from "@/sync/tooling/persistence/store";
@@ -13,7 +14,6 @@ import { processPromiseQueue } from "@/sync/tooling/promises";
 
 import { createBlockRanges, getNewBlocks } from "@/sync/tooling/network/blocks";
 import {
-  cwd,
   exists,
   readLatestRunCapture,
   saveLatestRunCapture,

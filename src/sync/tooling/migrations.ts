@@ -66,7 +66,7 @@ export const applyMigrations = async (
             )) as unknown as Block; // engine will work with either definition
           }
         }
-        // use the latest detected block
+        // use the latest detected block and fix it so we don't apply latest again
         migration.blockNumber = engine.latestBlocks[migration.chainId].number;
       }
       // check this will be triggered here...

@@ -58,10 +58,6 @@ export const getLatestSyncMeta = async () => {
         engine.latestEntity[chainId]?.lockedAt ||
         engine.latestEntity[chainId]?.latestBlock ||
         0;
-      // toBlock is always "latest" from when we collect the events
-      engine.latestBlocks[chainId] = await syncProviders[chainId].getBlock(
-        "latest"
-      );
 
       // bool on comp
       return true;
@@ -126,7 +122,6 @@ export const checkLocks = async (chainIds: Set<number>, startTime: number) => {
 // update the pointers to reflect latest sync
 export const updateSyncPointers = async (
   sorted: SyncEvent[],
-  listen: boolean,
   chainUpdates: string[]
 ) => {
   // get the engine
@@ -199,7 +194,7 @@ export const updateSyncPointers = async (
       }
 
       // when listening we can leave this locked until later
-      if (!listen) {
+      if (!engine.flags.listen) {
         // remove the lock for the next iteration
         engine.latestEntity[chainId].set("locked", false);
       }

@@ -84,7 +84,11 @@ export type Engine = {
   };
   exit?: (() => Promise<void>) | undefined;
   close?: (() => Promise<void>) | undefined;
-  appendEvents?: (events: SyncEvent[], silent?: boolean) => Promise<void>;
+  catchup?: (() => Promise<SyncResponse>) | undefined;
+  appendEvents?: (
+    events: SyncEvent[],
+    silent?: boolean
+  ) => Promise<void> | undefined;
 };
 
 // run events against a cron schedule
@@ -162,9 +166,10 @@ export type Sync = {
 export type SyncResponse = {
   error?: any;
   syncOps?: number;
-  events?: number;
+  events?: SyncEvent[];
   runTime?: string;
   chainIds?: number[];
+  processed?: number;
   eventsByChain?: Record<number, number>;
   startBlocksByChain?: Record<number, number>;
   latestBlocksByChain?: Record<number, number>;

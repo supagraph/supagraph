@@ -3,10 +3,12 @@ import dotenv from "dotenv";
 
 // Import types used by db
 import { BatchOp, Engine, KV } from "@/sync/types";
-import { cwd } from "@/sync/tooling/persistence/disk";
 
 // Import node-persist to power the local db store (this could be replace with something like sqlite)
 import Storage from "node-persist";
+
+// Get the user land current working directory
+import { cwd } from "@/utils";
 
 // load the .env to check NODE_ENV (only used for this purpose)
 dotenv.config();
