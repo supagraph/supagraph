@@ -265,35 +265,6 @@ export const sync = async ({
         errorPromise,
         onError
       );
-    } else if (schedule) {
-      // keep track of when we're running so we don't overlap calls (we'll catchup next call if we missed something)
-      let runningSchedule = false;
-      // check now to trigger save of last run time
-      await checkSchedule(new Date().getTime() / 1e3);
-      // set interval to check schedule
-      const interval = setInterval(() => {
-        // get now, we'll use this to move to the minute mark and call the scheduler
-        const now = new Date();
-        // wait until the minute reaches 0
-        const secondsUntilNextMinute = 60 - now.getSeconds();
-        // check the schedule on the next minute mark
-        setTimeout(() => {
-          // if its not currently being checked, check it now...
-          if (!runningSchedule) {
-            // check the schedule against the current time
-            checkSchedule(new Date().getTime() / 1e3).then(() => {
-              // return to false for next call in 1 min
-              runningSchedule = false;
-            });
-          }
-        }, secondsUntilNextMinute * 1e3);
-      }, 60e3); // check once a minute
-
-      // close the interval on soft/hard close (same action for now)
-      listeners = [
-        async () => clearInterval(interval),
-        async () => clearInterval(interval),
-      ];
     }
 
     // set the appendEvents against the engine to allow events to be appended during runtime (via addSync)
@@ -420,12 +391,41 @@ export const sync = async ({
       );
 
     // if enabled, place in the microtask queue to open listeners after we return the sync summary and close/exit fn
-    if (!listen) {
-      // set syncing to false - we never opened the listeners
-      engine.syncing = false;
-    } else {
+    if (listen) {
       // start handling block ingestion calling and calling appropriate sync handlers
       setImmediate(() => ingestor?.startProcessing?.());
+    } else if (schedule) {
+      // keep track of when we're running so we don't overlap calls (we'll catchup next call if we missed something)
+      let runningSchedule = false;
+      // check now to trigger save of last run time
+      await checkSchedule(new Date().getTime() / 1e3);
+      // set interval to check schedule
+      const interval = setInterval(() => {
+        // get now, we'll use this to move to the minute mark and call the scheduler
+        const now = new Date();
+        // wait until the minute reaches 0
+        const secondsUntilNextMinute = 60 - now.getSeconds();
+        // check the schedule on the next minute mark
+        setTimeout(() => {
+          // if its not currently being checked, check it now...
+          if (!runningSchedule) {
+            // check the schedule against the current time
+            checkSchedule(new Date().getTime() / 1e3).then(() => {
+              // return to false for next call in 1 min
+              runningSchedule = false;
+            });
+          }
+        }, secondsUntilNextMinute * 1e3);
+      }, 60e3); // check once a minute
+
+      // close the interval on soft/hard close (same action for now)
+      listeners = [
+        async () => clearInterval(interval),
+        async () => clearInterval(interval),
+      ];
+    } else {
+      // set syncing to false - we never opened the listeners
+      engine.syncing = false;
     }
 
     // return a summary of the operation to the caller (and the close() fn if we called sync({...}) with listen: true)

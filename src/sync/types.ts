@@ -153,7 +153,7 @@ export type Sync = {
   eventName: string;
   handlers: string;
   address?: string;
-  eventAbi?: ethers.Contract["abi"];
+  events?: ethers.Contract["abi"];
   opts?: {
     mode?: string;
     collectBlocks?: boolean;

@@ -35,7 +35,7 @@ const handler = addSync<types_for_emitted_log_message>({
   eventName: CONTRACT_EVT,
   address: CONTRACT_ADDRESS,
   provider: CHAINS_PROVIDER,
-  eventAbi: CONTRACT_ABI,
+  events: CONTRACT_ABI,
   startBlock: CONTRACT_START_BLOCK,
   onEvent: async (args, { tx, block }) => {
     // Code for handling the sync operation

@@ -44,6 +44,12 @@ We are depending on:
 - `typescript`, `eslint`, and `prettier` to maintain coding standards
 - `ttsc` and `typescript-transform-paths` for comp
 
+## Breaking changes
+
+We are working towards a v0.0.1, please expect non-semvar breaking changes until we reach a stable design. We will do our best to outline any changes which alter interfaces here:
+
+- `v0.0.1-rc.64` - renamed `Sync`s `eventAbi` property to `events` for consistency with `config`/`handler` hookups
+
 ## Contributing
 
 If you would like to contribute to `supagraph`, please follow these steps:

@@ -198,7 +198,7 @@ const wrapEventRes = async (
 // pull new events from the contract
 export const getNewEvents = async (
   address: string | undefined,
-  eventAbi: ethers.Contract["abi"] | undefined,
+  events: ethers.Contract["abi"] | undefined,
   eventName: string,
   fromBlock: number,
   toBlock: number,
@@ -214,9 +214,9 @@ export const getNewEvents = async (
   // get the chainId
   const { chainId } = provider.network;
   // only proceed if the contract is known...
-  if (address && eventAbi) {
+  if (address && events) {
     // connect to contract and filter for events to build data-set
-    const contract = new ethers.Contract(address, eventAbi, provider);
+    const contract = new ethers.Contract(address, events, provider);
     // can only add events if they exist on the contract
     if (contract.filters[eventName]) {
       // create a new eventRange for each 500,000 blocks (to process in parallel)
@@ -307,12 +307,12 @@ export const getNewSyncEvents = async (
       const {
         chainId,
         address,
-        eventAbi,
         eventName,
         provider,
         startBlock,
         endBlock,
         opts,
+        events: eventsAbi,
         onEvent,
       } = opSync;
 
@@ -327,11 +327,11 @@ export const getNewSyncEvents = async (
         onEvent;
 
       // when provided an address - we're mapping a contract...
-      if (address && eventAbi) {
+      if (address && eventsAbi) {
         // record the event interface so we can reconstruct args to feed to callback
         engine.eventIfaces[`${addresses[address || chainId]}-${eventName}`] =
           engine.eventIfaces[`${addresses[address || chainId]}-${eventName}`] ||
-          new ethers.utils.Interface(eventAbi);
+          new ethers.utils.Interface(eventsAbi);
       }
 
       // check if we should be pulling events in this sync or using the tmp cache
@@ -385,7 +385,7 @@ export const getNewSyncEvents = async (
           // all new events to be processed in this sync (only make the req if we will be querying a new block)
           newEvents = await getNewEvents(
             address,
-            eventAbi,
+            eventsAbi,
             eventName,
             fromBlock,
             toBlock,

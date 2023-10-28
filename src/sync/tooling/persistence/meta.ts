@@ -283,7 +283,7 @@ export const updateSyncsOpsMeta = async (
         chainId: sync.chainId,
         handlers: sync.handlers,
         eventName: sync.eventName,
-        events: sync.eventAbi,
+        events: sync.events,
         address: sync.address,
         mode: sync.opts?.mode || "config",
         collectBlocks: sync.opts?.collectBlocks || false,
@@ -381,7 +381,7 @@ export const restoreSyncOps = async (
               startBlock: syncOp.startBlock,
               endBlock: syncOp.endBlock,
               address: syncOp.address,
-              eventAbi: syncOp.events,
+              events: syncOp.events,
               handlers: syncOp.handlers,
               opts: {
                 mode: syncOp.mode,
