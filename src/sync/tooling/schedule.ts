@@ -57,7 +57,7 @@ export const checkSchedule = async (blockTimestamp: number) => {
               ).toUTCString()}\n\nFunction processed `
             );
 
-          // open a checkpoint
+          // open a checkpoint (this will need commiting if we dont throw)
           engine.stage.checkpoint();
 
           // attempt the scheduled handler
@@ -69,10 +69,12 @@ export const checkSchedule = async (blockTimestamp: number) => {
             console.error(e);
           }
 
+          // allow the promise queue to be aborted
+          let aborted = false;
           // attempt to flush the promiseQueue and resolve any withPromise callbacks
           try {
             // create a checkpoint
-            engine?.stage?.checkpoint();
+            engine.stage.checkpoint();
             // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
             await processPromiseQueue(engine.promiseQueue || []);
             // iterate on the syncs and call withPromises
@@ -91,18 +93,26 @@ export const checkSchedule = async (blockTimestamp: number) => {
                 }
               }
             }
+            // clear the promiseQueue for next iteration
+            engine.promiseQueue.length = 0;
           } catch (e) {
-            // print error
-            console.log(e);
+            // mark as aborted
+            aborted = true;
             // revert the checkpoint
-            engine?.stage?.revert();
+            engine.stage.revert();
+            // clear new items from the queue
+            if (engine.promiseQueue.length > promiseQueueLength) {
+              // restore the prev queue length
+              engine.promiseQueue.length = promiseQueueLength;
+            }
             // print any errors from processing the promise queue section
             if (!engine.flags.silent) console.log(e);
           } finally {
-            // commit the checkpoint
-            await engine?.stage?.commit();
-            // clear the promiseQueue for next iteration
-            engine.promiseQueue.length = 0;
+            // check that we didnt throw before committing this checkpoint
+            if (!aborted) {
+              // commit the checkpoint
+              await engine.stage.commit();
+            }
           }
 
           // mark after we end the processing
@@ -131,15 +141,10 @@ export const checkSchedule = async (blockTimestamp: number) => {
           // after all events are stored in db
           if (!engine.flags.silent) process.stdout.write("✔\n");
         } catch (e) {
-          // print error
-          console.log(e);
+          // print any errors from processing the schedule
+          if (!engine.flags.silent) console.log(e);
           // revert changes
           engine.stage.revert();
-          // check if we moved the length...
-          if (engine.promiseQueue.length > promiseQueueLength) {
-            // restore the prev queue length
-            engine.promiseQueue.length = promiseQueueLength;
-          }
         }
       }
     } catch (e) {

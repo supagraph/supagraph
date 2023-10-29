@@ -344,7 +344,7 @@ export const processEvents = async () => {
     const chainUpdates: string[] = [];
 
     // create a checkpoint
-    engine?.stage?.checkpoint();
+    engine.stage.checkpoint();
 
     // log that we're starting
     if (!engine.flags.silent) process.stdout.write(`\n--\n\nEvents processed `);
@@ -355,7 +355,10 @@ export const processEvents = async () => {
       const opSorted = engine.events.shift();
 
       // create a checkpoint
-      engine?.stage?.checkpoint();
+      engine.stage.checkpoint();
+
+      // we don't commit if we revert
+      let abortedCallback = false;
 
       // wrap in try catch so that we don't leave any checkpoints open
       try {
@@ -372,14 +375,16 @@ export const processEvents = async () => {
       } catch (e) {
         // log any errors from handlers - this should probably halt execution
         console.log(e);
+        // mark as aborted
+        abortedCallback = true;
         // clear anything added here...
         engine.stage.revert();
         // throw the error again
         throw e;
+      } finally {
+        // commit the checkpoint on the db...
+        if (!abortedCallback) await engine.stage.commit();
       }
-
-      // commit the checkpoint on the db...
-      await engine?.stage?.commit();
     }
 
     // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
@@ -412,7 +417,7 @@ export const processEvents = async () => {
     if (!engine.flags.silent) process.stdout.write("✔\nEntities stored ");
 
     // commit the checkpoint on the db...
-    await engine?.stage?.commit();
+    await engine.stage.commit();
 
     // no longer a newDB after committing changes
     engine.newDb = false;
@@ -493,8 +498,8 @@ export const processListenerBlock = async (
   )[] = [];
 
   // open a new checkpoint whenever we open without one (this will preserve all changes in mem until we get to queueLength === 0)
-  if (engine?.stage?.checkpoints.length === 0) {
-    engine?.stage?.checkpoint();
+  if (engine.stage.checkpoints.length === 0) {
+    engine.stage.checkpoint();
   }
 
   // log that we're syncing the block (*note that writing to stdout directly will bypass chromes inspector logs but will avoid risk of console.log leaking)
@@ -772,8 +777,9 @@ export const processListenerBlock = async (
           : txOrder;
       });
 
-      // checkpoint only these writes
-      engine.stage?.checkpoint();
+      // record length of promise queue before running handlers
+      const promiseQueueLength = engine.promiseQueue.length;
+
       // place sorted as events - this way we can extend the event state with addSyncs during execution
       engine.events = sorted as SyncEvent[];
 
@@ -782,14 +788,17 @@ export const processListenerBlock = async (
 
       // for each of the sync events call the callbacks sequentially (event loop to process all callbacks)
       while (engine.events.length > 0) {
+        // if we error we skip commit
+        let abortedProcess = false;
+        // collect the indexes of any promises made during execution for easy revert
+        let promiseQueueBeforeEachProcess: number;
+
         // take the first item from the sorted array
         const event = engine.events.shift();
 
-        // create a checkpoint
-        engine?.stage?.checkpoint();
+        // create a checkpoint for these changes
+        engine.stage.checkpoint();
 
-        // collect the indexes of any promises made during execution for easy revert
-        let promiseQueueBeforeEachProcess: number;
         // wrap in try catch so that we don't leave any checkpoints open
         try {
           // position queue marker at new length
@@ -799,20 +808,19 @@ export const processListenerBlock = async (
         } catch (e) {
           // log any errors from handlers - this should probably halt execution
           console.log(e);
+          // mark as aborted
+          abortedProcess = true;
           // should splice only new messages added in this callback from the message queue
           engine.promiseQueue.length = promiseQueueBeforeEachProcess;
           // clear anything added here...
           engine.stage.revert();
           // throw the error again (end exec - skip commit)
           throw e;
+        } finally {
+          // commit the checkpoint to parent
+          if (!abortedProcess) await engine.stage.commit();
         }
-
-        // commit the checkpoint on the db...
-        await engine?.stage?.commit();
       }
-
-      // move thes changes to the parent checkpoint
-      await engine?.stage?.commit();
 
       // print number of events in stdout
       if (!silent) process.stdout.write(`(${processed.length}) `);
@@ -822,12 +830,15 @@ export const processListenerBlock = async (
         // only attempt to save changes when the queue is clear (or it has been 15s since we last stored changes)
         if (
           queueLength === 0 ||
-          ((engine?.lastUpdate || 0) + 15000 <= new Date().getTime() &&
+          ((engine.lastUpdate || 0) + 15000 <= new Date().getTime() &&
             queueLength < 1000)
         ) {
+          // allow the promise queue to be aborted
+          let aborted = false;
+          // attempt to flush the promiseQueue and resolve any withPromise callbacks
           try {
             // create a checkpoint
-            engine?.stage?.checkpoint();
+            engine.stage.checkpoint();
             // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
             await processPromiseQueue(engine.promiseQueue || []);
             // iterate on the syncs and call withPromises
@@ -846,18 +857,26 @@ export const processListenerBlock = async (
                 }
               }
             }
+            // clear the promiseQueue for next iteration
+            engine.promiseQueue.length = 0;
           } catch (e) {
-            // print error
-            console.log(e);
+            // mark as aborted
+            aborted = true;
             // revert the checkpoint
-            engine?.stage?.revert();
+            engine.stage.revert();
+            // clear new items from the queue
+            if (engine.promiseQueue.length > promiseQueueLength) {
+              // restore the prev queue length
+              engine.promiseQueue.length = promiseQueueLength;
+            }
             // print any errors from processing the promise queue section
             if (!engine.flags.silent) console.log(e);
           } finally {
-            // commit the checkpoint
-            await engine?.stage?.commit();
-            // clear the promiseQueue for next iteration
-            engine.promiseQueue.length = 0;
+            // check that we didnt throw before committing this checkpoint
+            if (!aborted) {
+              // commit the checkpoint to parent
+              await engine.stage.commit();
+            }
           }
 
           // mark after we end the processing
@@ -874,8 +893,11 @@ export const processListenerBlock = async (
             );
           }
 
-          // commit the checkpoint on the db...
-          await engine?.stage?.commit();
+          // make sure we perform all checkpoint updates in this call
+          while (engine.stage.isCheckpoint) {
+            // commit the checkpoint on the db...
+            await engine.stage.commit();
+          }
 
           // after all events are stored in db
           if (!silent) process.stdout.write("✔\nPointers updated ");
