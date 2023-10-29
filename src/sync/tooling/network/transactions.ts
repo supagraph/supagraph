@@ -93,7 +93,7 @@ export const txsFromRange = async (
 
       // save the transactions
       await Promise.all(
-        block.transactions.map(
+        (block.transactions || []).map(
           async (tx: string | TransactionResponse, txIndex: number) => {
             // add the fetched block to the result
             result.add({

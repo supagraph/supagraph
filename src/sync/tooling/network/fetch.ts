@@ -13,6 +13,12 @@ import { processPromiseQueue } from "@/sync/tooling/promises";
 import { getBlockByNumber } from "@/sync/tooling/network/blocks";
 import { getTransactionReceipt } from "@/sync/tooling/network/transactions";
 
+// Constants used in post requests
+const method = "POST";
+const headers = {
+  "Content-Type": "application/json",
+};
+
 // this is only managing about 20k blocks before infura gets complainee
 export const attemptFnCall = async <T extends Record<string, any>>(
   syncProviders: Record<number, JsonRpcProvider | WebSocketProvider>,
@@ -210,3 +216,66 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
   if (!silent && events.length)
     console.log(`All ${type} collected (${[...result].length})`);
 };
+
+// Method to fetch data via a given rpc url
+export async function fetchDataWithRetries<T>(
+  url: string,
+  rpcMethod: string,
+  rpcParams: unknown[],
+  maxRetries: number = 3,
+  silent: boolean = true
+) {
+  // keep response outside so we can cancel the req in finally
+  let response: Response;
+
+  // attempt to fetch the block data
+  for (let retry = 1; retry <= maxRetries; retry += 1) {
+    try {
+      // set an abort controller to timeout the request
+      const controller = new AbortController();
+
+      // timeout after 30seconds by aborting the request
+      const timeout = setTimeout(() => controller.abort(), 30e3);
+
+      // use fetch to grab the blockdata directly from the rpcUrl endpoint
+      response = await fetch(url, {
+        method,
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: rpcMethod,
+          params: rpcParams,
+          id: Math.floor(Math.random() * 1e8),
+        }),
+        signal: controller.signal,
+      });
+
+      // collect the response
+      const data = await response.json();
+
+      // clear the abort
+      clearTimeout(timeout);
+
+      // return the result
+      if (data.result) return data.result as T;
+    } catch (error) {
+      // if theres an error we'll try again upto maxRetries
+      if (!silent)
+        console.error(`Error fetching ${rpcMethod} (retry ${retry}):`, error);
+      // lets wait a second after a failed fetch before attempting it again
+      await new Promise((resolve) => {
+        setTimeout(
+          resolve,
+          // try again in anywhere from 1 to 5 seconds
+          Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+        );
+      });
+    } finally {
+      // finally, if we returned or errored, we need to cancel the body to close the resource
+      if (response && !response.bodyUsed) response.body.cancel();
+    }
+  }
+
+  // if we fail to return the result then we should restack the task
+  return null;
+}

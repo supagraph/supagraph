@@ -86,7 +86,7 @@ export const processCallback = async (
               transactionHash: eventData.transactionHash,
               transactionIndex: eventData.transactionIndex,
               blockHash: eventData.blockHash,
-              blockNumber: eventData.blockNumber,
+              blockNumber: +eventData.blockNumber,
             } as unknown as TransactionReceipt)
           : await readJSON<TransactionReceipt>(
               "transactions",
@@ -101,7 +101,7 @@ export const processCallback = async (
         (!engine.flags.collectBlocks && !event.collectBlock
           ? ({
               hash: eventData.blockHash,
-              number: eventData.blockNumber,
+              number: +eventData.blockNumber,
               timestamp: event.timestamp || eventData.blockNumber,
             } as unknown as Block)
           : await readJSON<Block>(
@@ -128,17 +128,20 @@ export const processCallback = async (
               extraData: block.extraData,
               baseFeePerGas: block.baseFeePerGas,
               transactions: [
-                ...block.transactions.map((blockTx: { hash: any } | string) => {
-                  // take a copy of each tx to drop assoc
-                  return typeof blockTx === "string"
-                    ? blockTx
-                    : JSON.parse(JSON.stringify(blockTx));
-                }),
+                ...(block.transactions || []).map(
+                  (blockTx: { hash: any } | string) => {
+                    // take a copy of each tx to drop assoc
+                    return typeof blockTx === "string"
+                      ? blockTx
+                      : JSON.parse(JSON.stringify(blockTx));
+                  }
+                ),
               ],
             }
           : ({
+              hash: eventData.blockHash,
+              number: +eventData.blockNumber,
               timestamp: event.timestamp || eventData.blockNumber,
-              number: eventData.blockNumber,
             } as Block)
       );
 
@@ -198,7 +201,7 @@ export const processCallback = async (
         extraData: block.extraData,
         baseFeePerGas: block.baseFeePerGas,
         transactions: [
-          ...block.transactions.map((tx: { hash: any }) => {
+          ...(block.transactions || []).map((tx: { hash: any }) => {
             // take a copy of each tx to drop assoc
             return tx?.hash ? JSON.parse(JSON.stringify(tx)) : tx;
           }),
@@ -246,7 +249,7 @@ export const processCallback = async (
         extraData: block.extraData,
         baseFeePerGas: block.baseFeePerGas,
         transactions: [
-          ...block.transactions.map((tx: { hash: any }) => {
+          ...(block.transactions || []).map((tx: { hash: any }) => {
             // take a copy of each tx to drop assoc
             return tx?.hash ? JSON.parse(JSON.stringify(tx)) : tx;
           }),
@@ -299,12 +302,14 @@ export const processCallback = async (
         extraData: block.extraData,
         baseFeePerGas: block.baseFeePerGas,
         transactions: [
-          ...block.transactions.map((blockTx: { hash: any } | string) => {
-            // take a copy of each tx to drop assoc
-            return typeof blockTx === "string"
-              ? blockTx
-              : JSON.parse(JSON.stringify(blockTx));
-          }),
+          ...(block.transactions || []).map(
+            (blockTx: { hash: any } | string) => {
+              // take a copy of each tx to drop assoc
+              return typeof blockTx === "string"
+                ? blockTx
+                : JSON.parse(JSON.stringify(blockTx));
+            }
+          ),
         ],
       });
       // await the response of the handler before moving to the next operation in the sorted ops
@@ -530,7 +535,7 @@ export const processListenerBlock = async (
       extraData: block.extraData,
       baseFeePerGas: block.baseFeePerGas,
       transactions: [
-        ...block.transactions.map((tx: { hash: any }) => {
+        ...(block.transactions || []).map((tx: { hash: any }) => {
           // take a copy of each tx to drop assoc to global mem block
           return tx?.hash ? JSON.parse(JSON.stringify(tx)) : tx;
         }),
@@ -635,7 +640,7 @@ export const processListenerBlock = async (
             data: {
               blockNumber: block.number,
             } as Event & { blockNumber: number },
-            blockNumber: block.number,
+            blockNumber: +block.number,
             eventName: op.eventName,
             args: [],
             tx: {} as TransactionReceipt & TransactionResponse,
@@ -659,7 +664,7 @@ export const processListenerBlock = async (
               data: {
                 blockNumber: block.number,
               },
-              blockNumber: block.number,
+              blockNumber: +block.number,
               eventName: op.eventName,
               args: [],
               tx: JSON.parse(
@@ -737,7 +742,7 @@ export const processListenerBlock = async (
                         topics: log.topics,
                         data: log.data,
                       },
-                      blockNumber: block.number,
+                      blockNumber: +block.number,
                       eventName: op.eventName,
                       args,
                       tx: JSON.parse(
@@ -911,7 +916,7 @@ export const processListenerBlock = async (
 
         // record as new latest after all callbacks are complete
         engine.latestBlocks[+chainId] = {
-          number: block.number,
+          number: +block.number,
         } as unknown as Block;
 
         // update the pointers to reflect the latest sync

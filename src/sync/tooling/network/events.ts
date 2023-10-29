@@ -497,10 +497,12 @@ export const getNewSyncEventsBlocks = async (
     (!start || SyncStage[start] <= SyncStage.sort) &&
     (!stop || SyncStage[stop] >= SyncStage.blocks)
   ) {
+    const filtered = events.filter((evt) => !!evt.collectBlock);
+
     // extract blocks and call getBlock once for each discovered block - then index against blocks number
     await getFnResultForProp<Block>(
       events,
-      events,
+      filtered,
       syncProviders,
       "blocks",
       "blockNumber",

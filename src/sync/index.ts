@@ -40,6 +40,13 @@ export {
   callMulticallContract,
 } from "@/sync/tooling/network/multicall";
 
+// Export block and receipt getters
+export { getBlockByNumber } from "@/sync/tooling/network/blocks";
+export { getTransactionReceipt } from "@/sync/tooling/network/transactions";
+
+// Export generic fetch utility to call RPC methods directly
+export { fetchDataWithRetries } from "@/sync/tooling/network/fetch";
+
 // Export root level persistence tooling
 export { DB } from "@/sync/tooling/persistence/db";
 export { Mongo } from "@/sync/tooling/persistence/mongo";
@@ -198,9 +205,11 @@ export const sync = async ({
     await checkLocks(chainIds, startTime);
 
     // check if we're globally including, or individually including the blocks
-    const collectAnyBlocks = engine.syncs.reduce((collectBlock, opSync) => {
-      return collectBlock || opSync.opts?.collectBlocks || false;
-    }, collectBlocks);
+    const collectAnyBlocks =
+      !!migrations?.length ||
+      engine.syncs.reduce((collectBlock, opSync) => {
+        return collectBlock || opSync.opts?.collectBlocks || false;
+      }, collectBlocks);
 
     // check if we're globally including, or individually including the txReceipts
     const collectAnyTxReceipts = engine.syncs.reduce(
@@ -290,8 +299,11 @@ export const sync = async ({
         engine.flags.stop
       );
 
-      // add new events to the current set (by mutation)
-      engine.events.push(...prcEvents);
+      // move from prcEvents to evt
+      while (prcEvents.length) {
+        // add new events to the current set (by mutation)
+        engine.events.push(prcEvents.shift());
+      }
 
       // sort the events into processing order (no changes to engine.events after this point except for processing)
       engine.events = await getNewSyncEventsSorted(
