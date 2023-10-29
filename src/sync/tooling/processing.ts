@@ -383,7 +383,7 @@ export const processEvents = async () => {
     }
 
     // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
-    await processPromiseQueue(engine.promiseQueue);
+    await processPromiseQueue(engine.promiseQueue || []);
 
     // iterate on the syncs and call withPromises
     for (const group of Object.keys(engine.handlers)) {
@@ -780,9 +780,6 @@ export const processListenerBlock = async (
       // temp record what has been processed
       const processed: SyncEvent[] = [];
 
-      // record length before we started
-      const promiseQueueBefore = engine.promiseQueue.length - 1;
-
       // for each of the sync events call the callbacks sequentially (event loop to process all callbacks)
       while (engine.events.length > 0) {
         // take the first item from the sorted array
@@ -814,14 +811,8 @@ export const processListenerBlock = async (
         await engine?.stage?.commit();
       }
 
-      // commit or revert
-      if (!blockParts.cancelled) {
-        // move thes changes to the parent checkpoint
-        await engine?.stage?.commit();
-      } else {
-        // should splice only new messages added in this callback from the message queue
-        engine.promiseQueue.length = promiseQueueBefore;
-      }
+      // move thes changes to the parent checkpoint
+      await engine?.stage?.commit();
 
       // print number of events in stdout
       if (!silent) process.stdout.write(`(${processed.length}) `);
@@ -835,8 +826,10 @@ export const processListenerBlock = async (
             queueLength < 1000)
         ) {
           try {
+            // create a checkpoint
+            engine?.stage?.checkpoint();
             // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
-            await processPromiseQueue(engine.promiseQueue);
+            await processPromiseQueue(engine.promiseQueue || []);
             // iterate on the syncs and call withPromises
             for (const group of Object.keys(engine.handlers)) {
               for (const eventName of Object.keys(engine.handlers[group])) {
@@ -854,9 +847,15 @@ export const processListenerBlock = async (
               }
             }
           } catch (e) {
+            // print error
+            console.log(e);
+            // revert the checkpoint
+            engine?.stage?.revert();
             // print any errors from processing the promise queue section
             if (!engine.flags.silent) console.log(e);
           } finally {
+            // commit the checkpoint
+            await engine?.stage?.commit();
             // clear the promiseQueue for next iteration
             engine.promiseQueue.length = 0;
           }

@@ -48,11 +48,20 @@ export const processPromiseQueue = async (
             )(reqStack);
           }
         } catch (e) {
+          // failure processing promiseQueue item
+          console.log(e);
           // if theres an error - restack upto 10 times before throwing in outer context
-          if (attempts < 3) {
+          if (attempts < 6) {
             // print the error
             if (!engine.flags.silent) console.log(e);
-            // make another attempt
+            // wait a random timeout before attempting again (between 1 and 5 seconds)
+            await new Promise((resolveWait) => {
+              setTimeout(
+                resolveWait,
+                Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+              );
+            });
+            // push the next attempt (befor this ends so reqStack len increases)
             reqStack.push(async () => keepTrying(attempts + 1));
           } else {
             // throw the error externally
@@ -90,12 +99,14 @@ export const processPromiseQueue = async (
               reject(e);
             });
           }
-        })
-        .then(() => {
           // remove all from queue on cleanup
           if (cleanup) {
             queue.length = 0;
           }
+        })
+        .catch((e) => {
+          // catch and reject
+          reject(e);
         })
     );
   });

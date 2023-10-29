@@ -302,7 +302,16 @@ export class Mongo extends DB {
               }),
         };
         // attempt the put and retry on failure until it succeeds (all other processing will be halted while we wait for this to complete)
-        await put(db, ref, filter, val).catch(function retry() {
+        await put(db, ref, filter, val).catch(async function retry() {
+          // wait a second before trying again
+          await new Promise((resolve) => {
+            setTimeout(
+              resolve,
+              // anywhere between 1 and 5 seconds
+              Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+            );
+          });
+          // retry the action (with another timeout on failure)
           return put(db, ref, filter, val).catch(retry);
         });
       }
@@ -335,7 +344,16 @@ export class Mongo extends DB {
         // delete the single document we discovered
         if (document) {
           // keep attempting the delete until it succeeds
-          await del(db, ref, document).catch(function retry() {
+          await del(db, ref, document).catch(async function retry() {
+            // wait a second before trying again
+            await new Promise((resolve) => {
+              setTimeout(
+                resolve,
+                // anywhere between 1 and 5 seconds
+                Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+              );
+            });
+            // retry the action (with another timeout on failure)
             return del(db, ref, document).catch(retry);
           });
         }
@@ -441,6 +459,15 @@ export class Mongo extends DB {
         const db = await this._db;
         // don't stop trying until this returns successfully
         await bulkWrite(db, collection, batch).catch(async function retry() {
+          // wait a second before trying again
+          await new Promise((resolve) => {
+            setTimeout(
+              resolve,
+              // anywhere between 1 and 5 seconds
+              Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+            );
+          });
+          // retry the action (with another timeout)
           return bulkWrite(db, collection, batch).catch(retry);
         });
       }
@@ -482,7 +509,7 @@ const bulkWrite = async (
   batch: AnyBulkWriteOperation<Document>[]
 ) => {
   await db.collection(collection).bulkWrite(batch, {
-    // allow for parallel writes (we've already ensured one entry per key with our staged sets (use checkpoint & commit))
+    // allow for parallel writes (we've already ensured one entry per key with our staged sets (using checkpoint & commit))
     ordered: false,
     // write objectIds mongo side
     forceServerObjectId: true,
