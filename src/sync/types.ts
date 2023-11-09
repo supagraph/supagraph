@@ -68,10 +68,6 @@ export type Engine = {
   events?: SyncEvent[];
   processTimeout?: number;
   indexedMigrations?: Record<string, Migration[]>;
-  indexedMigrationEntities?: Record<
-    string,
-    Record<number, Promise<{ id: string }[]>>
-  >;
   // flags to change runtime behavior
   flags?: {
     start?: keyof typeof SyncStage | false;

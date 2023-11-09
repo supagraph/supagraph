@@ -135,7 +135,7 @@ export const updateSyncPointers = async (
     Array.from(chainIds).map(async (chainId) => {
       // we want to select the latest block this chains events
       const chainsEvents: typeof sorted = sorted.filter(
-        (ev) => ev.chainId === chainId
+        (ev) => +ev.chainId === +chainId
       );
       // get the last entry in this array
       const chainsLatestBlock: (typeof sorted)[0] =

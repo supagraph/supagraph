@@ -1,6 +1,6 @@
 import {
   Block,
-  TransactionReceipt,
+  BlockWithTransactions,
   TransactionResponse,
 } from "@ethersproject/abstract-provider";
 import { JsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
@@ -9,58 +9,86 @@ import { getEngine } from "@/sync/tooling/persistence/store";
 import { readJSON, saveJSON } from "@/sync/tooling/persistence/disk";
 import { processPromiseQueue } from "@/sync/tooling/promises";
 
-import { createBlockRanges } from "@/sync/tooling/network/blocks";
+import {
+  createBlockRanges,
+  fetchAndSaveBlock,
+} from "@/sync/tooling/network/blocks";
 
-// get a full transaction receipt from hash
-export const getTransactionReceipt = async (
+import { getTransactionReceipt } from "@/sync/tooling/network/fetch";
+
+// fetch and save all transactions in a block
+export const fetchAndSaveTransactions = async (
   provider: JsonRpcProvider | WebSocketProvider,
-  txHash: string | TransactionResponse,
-  maxRetries: number = 3,
-  retryDelay: number = 1000
-): Promise<TransactionReceipt> => {
-  let retries = 0;
-  let txReceipt: TransactionReceipt;
-  // keep attempting upto retry limit
-  while (retries < maxRetries) {
-    try {
-      const tx = (txHash as TransactionResponse)?.hash
-        ? txHash
-        : await provider.send("eth_getTransactionByHash", [txHash]);
-      const receipt = await provider.send("eth_getTransactionReceipt", [
-        tx.hash,
-      ]);
+  block: Block | undefined,
+  chainId: number,
+  number: number,
+  result: Set<{
+    hash: string;
+    txIndex: number;
+    block: number;
+  }>,
+  collectTxReceipts: boolean = false
+) => {
+  // fetch and save the block then the transactions (optionally pulling receipts)
+  await (block && block.number
+    ? // resolve the block we were provided
+      Promise.resolve(block)
+    : // attempt to read from disk and fallback to fetch
+      new Promise((resolve) => {
+        // attempt to read from disk
+        try {
+          resolve(
+            readJSON<Block>(
+              "blocks",
+              `${chainId}-${parseInt(`${number}`).toString(10)}`
+            ).then((data) => {
+              // if the data is incomplete then throw to trigger fetch
+              if (!data.number) throw new Error("Missing block data");
+            })
+          );
+        } catch {
+          // fallback to a fetch
+          resolve(fetchAndSaveBlock(provider, chainId, number, new Set()));
+        }
+      })
+  ).then(async (_block: Block | BlockWithTransactions) => {
+    // save the transactions
+    await Promise.all(
+      (_block.transactions || []).map(
+        async (tx: string | TransactionResponse, txIndex: number) => {
+          // if collectTxReceipts fetch the receipt
+          const saveTx =
+            !collectTxReceipts && typeof tx !== "string"
+              ? tx
+              : {
+                  // txResponse & txReceipt if collectTxReceipts
+                  ...(typeof tx === "string" ? {} : tx),
+                  // replace this with a fetch to the rpc to get the full tx receipt (including gas details)
+                  ...(await getTransactionReceipt(provider, tx)),
+                };
 
-      // if we discovered the block record it
-      if (receipt && receipt.transactionHash && tx.hash) {
-        // set for returning
-        txReceipt = {
-          ...tx,
-          ...receipt,
-        };
-        // break the while loop on success
-        break;
-      } else {
-        // throw to retry/end
-        throw new Error("No transaction response");
-      }
-    } catch (error) {
-      // catch any errors
-      retries += 1;
+          // save each tx to disk to release from mem
+          await saveJSON(
+            "transactions",
+            `${chainId}-${typeof tx === "string" ? tx : tx.hash}`,
+            saveTx as unknown as Record<string, unknown>
+          );
 
-      // timeout with a delay
-      if (retries < maxRetries) {
-        await new Promise((resolve) => {
-          setTimeout(resolve, retryDelay);
-        });
-      } else {
-        // handle when maximum retries are reached, e.g., log an error or throw an exception.
-        throw error;
-      }
-    }
-  }
+          // add the fetched block to the result
+          result.add({
+            // index according to position in the block
+            txIndex,
+            // allow for the tx to be passed as its hash (we're currently requesting all txResponses from the block so it will never be a string atm)
+            hash: typeof tx === "string" ? tx : tx.hash,
+            block: +parseInt(`${_block.number}`).toString(10),
+          });
 
-  // return the tx
-  return txReceipt;
+          // resolves to true;
+          return true;
+        }
+      )
+    );
+  });
 };
 
 // pull all transactions in the requested range
@@ -70,7 +98,9 @@ export const txsFromRange = async (
   from: number,
   to: number,
   collectTxReceipts: boolean,
+  // everything we place in the reqStack will eventually resolve
   reqStack: (() => Promise<any>)[],
+  // this call will fill this result set and save everything into tmp storage to avoid filling memory
   result: Set<{
     hash: string;
     txIndex: number;
@@ -78,74 +108,10 @@ export const txsFromRange = async (
   }>,
   silent?: boolean
 ) => {
-  // save to disk for future use
-  const fetchAndSaveBlock = async (number: number, block_?: Block) => {
-    // fetch the block and transactions via the provider (we dont need raw details ie logBlooms here)
-    const block = block_ || (await provider.getBlockWithTransactions(number));
-    // if we have a block
-    if (block?.number) {
-      // save the block to disk to release from mem
-      await saveJSON(
-        "blocks",
-        `${chainId}-${+parseInt(`${block.number}`).toString(10)}`,
-        block as unknown as Record<string, unknown>
-      );
-
-      // save the transactions
-      await Promise.all(
-        (block.transactions || []).map(
-          async (tx: string | TransactionResponse, txIndex: number) => {
-            // add the fetched block to the result
-            result.add({
-              // index according to position in the block
-              txIndex,
-              // allow for the tx to be passed as its hash (we're currently requesting all txResponses from the block so it will never be a string atm)
-              hash: typeof tx === "string" ? tx : tx.hash,
-              block: +parseInt(`${block.number}`).toString(10),
-            });
-
-            // if collectTxReceipts fetch the receipt
-            const saveTx =
-              !collectTxReceipts && typeof tx !== "string"
-                ? tx
-                : {
-                    // txResponse & txReceipt if collectTxReceipts
-                    ...(typeof tx === "string" ? {} : tx),
-                    // replace this with a fetch to the rpc to get the full tx receipt (including gas details)
-                    ...(await getTransactionReceipt(provider, tx)),
-                  };
-
-            // save each tx to disk to release from mem
-            await saveJSON(
-              "transactions",
-              `${chainId}-${typeof tx === "string" ? tx : tx.hash}`,
-              saveTx as unknown as Record<string, unknown>
-            );
-          }
-        )
-      );
-    } else {
-      // trigger error handler and retry...
-      throw new Error("No block response");
-    }
-  };
-
   // iterate the ranges and collect all blocks in that range
   while (from <= to) {
     // wait for each item to complete before fetching the next one
     await new Promise<unknown>((resolve, reject) => {
-      // carry out the fetch operation
-      const doFetch = async (block?: Block) => {
-        // do the actual fetch
-        return fetchAndSaveBlock(from, block)
-          .catch((e) => {
-            reject(e);
-          })
-          .then(() => {
-            resolve(true);
-          });
-      };
-
       // attempt to read the file from disk
       readJSON<Block>(
         "blocks",
@@ -154,14 +120,10 @@ export const txsFromRange = async (
         .then(async (data) => {
           if (data) {
             // console.log(file,`${cwd}blocks-${chainId}-${parseInt(`${from}`).toString(10)}.json` )
-            try {
-              // check data holds transactions
-              if (
-                data.transactions &&
-                data.transactions.length &&
-                // bail out and do the full fetch if we want receipts
-                !collectTxReceipts
-              ) {
+            // check data holds transactions
+            if (data.number && data.transactions) {
+              // bail out and do the full fetch if we want receipts
+              if (!collectTxReceipts) {
                 // add all tx hashes to the result
                 await Promise.all(
                   data.transactions.map(
@@ -187,20 +149,34 @@ export const txsFromRange = async (
                 // complete the promise
                 resolve(true);
               } else {
-                // fetch transactions from the provided block
-                await doFetch(data);
+                // fetch and save using the block to read tx responses
+                await fetchAndSaveTransactions(
+                  provider,
+                  data,
+                  chainId,
+                  from,
+                  result
+                )
+                  .then(() => {
+                    // complete the promise
+                    resolve(true);
+                  })
+                  .catch((e) => {
+                    reject(new Error(e));
+                  });
               }
-            } catch {
-              // fecth block and transactions from current from
-              await doFetch();
+            } else {
+              // fetch transactions from the provided block
+              reject(new Error("Missing transactions"));
             }
+          } else {
+            // fetch block
+            reject(new Error("Missing block"));
           }
         })
         .catch(async (err) => {
-          if (err) {
-            // fecth block and transactions from current from
-            await doFetch();
-          }
+          // error reading file - fetch block
+          reject(err);
         });
     }).catch(
       (function retry(attempts) {
@@ -214,8 +190,16 @@ export const txsFromRange = async (
 
         // return the error handler (recursive stacking against the reqStack)
         return (): void => {
+          // we'll push a new req to the stack and close this promise to release
           reqStack.push(() =>
-            fetchAndSaveBlock(from).catch(retry(attempts + 1))
+            fetchAndSaveTransactions(
+              provider,
+              // check the block again each attempt, we don't want to waste fetch cycles or halt execution with a missing block
+              undefined,
+              chainId,
+              from,
+              result
+            ).catch(retry(attempts + 1))
           );
         };
       })(1)

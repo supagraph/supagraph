@@ -1,31 +1,10 @@
-import { BlockWithTransactions } from "@ethersproject/abstract-provider";
 import { JsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
 
 import { getEngine } from "@/sync/tooling/persistence/store";
 import { readJSON, saveJSON } from "@/sync/tooling/persistence/disk";
 
 import { processPromiseQueue } from "@/sync/tooling/promises";
-
-// get a block and all transaction responses
-export const getBlockByNumber = async (
-  provider: JsonRpcProvider | WebSocketProvider,
-  blockNumber: number | "latest"
-): Promise<BlockWithTransactions> => {
-  try {
-    // fetch block by hex number passing true to fetch all transaction responses
-    const block = await provider.send("eth_getBlockByNumber", [
-      blockNumber === "latest" ? "latest" : `0x${blockNumber.toString(16)}`,
-      true,
-    ]);
-    // check the block holds data
-    if (!block?.number) {
-      throw new Error("No block response");
-    }
-    return block;
-  } catch {
-    return getBlockByNumber(provider, blockNumber);
-  }
-};
+import { getBlockByNumber } from "./fetch";
 
 // slice the range according to the provided limit
 export const createBlockRanges = (
@@ -59,36 +38,46 @@ export const createBlockRanges = (
   return blockRanges;
 };
 
+// save to disk for future use
+export const fetchAndSaveBlock = async (
+  provider: JsonRpcProvider | WebSocketProvider,
+  chainId: number,
+  number: number,
+  result: Set<number>
+) => {
+  // fetch the block and transactions via the provider (we dont need raw details ie logBlooms here)
+  const block = await getBlockByNumber(provider, number);
+  // if we have a block
+  if (block?.number) {
+    // save the block to disk to release from mem
+    await saveJSON(
+      "blocks",
+      `${chainId}-${parseInt(`${block.number}`).toString(10)}`,
+      block as unknown as Record<string, unknown>
+    );
+    // add the block to the result
+    result.add(+parseInt(`${block.number}`).toString(10));
+  } else {
+    // trigger error handler and retry...
+    throw new Error("No block response");
+  }
+
+  // return the block
+  return block;
+};
+
 // pull all blocks in the requested range
 export const blocksFromRange = async (
   chainId: number,
   provider: JsonRpcProvider | WebSocketProvider,
   from: number,
   to: number,
+  // everything we place in the reqStack will eventually resolve
   reqStack: (() => Promise<any>)[],
+  // this call will fill this result set and save everything into tmp storage to avoid filling memory
   result: Set<number>,
   silent: boolean
 ) => {
-  // save to disk for future use
-  const fetchAndSaveBlock = async (number: number) => {
-    // fetch the block and transactions via the provider (we dont need raw details ie logBlooms here)
-    const block = await provider.getBlockWithTransactions(number);
-    // if we have a block
-    if (block?.number) {
-      // add the block to the result
-      result.add(+parseInt(`${block.number}`).toString(10));
-      // save the block to disk to release from mem
-      await saveJSON(
-        "blocks",
-        `${chainId}-${parseInt(`${block.number}`).toString(10)}`,
-        block as unknown as Record<string, unknown>
-      );
-    } else {
-      // trigger error handler and retry...
-      throw new Error("No block response");
-    }
-  };
-
   // iterate the ranges and collect all blocks in that range
   while (+from <= +to) {
     await new Promise<unknown>((resolve, reject) => {
@@ -101,8 +90,9 @@ export const blocksFromRange = async (
             resolve(true);
           } else {
             // do the actual fetch
-            await fetchAndSaveBlock(+from)
+            await fetchAndSaveBlock(provider, chainId, +from, result)
               .then(() => {
+                // finished with promise
                 resolve(true);
               })
               .catch((e) => {
@@ -124,8 +114,13 @@ export const blocksFromRange = async (
 
         // return the error handler (recursive stacking against the reqStack)
         return (): void => {
-          reqStack.push(() =>
-            fetchAndSaveBlock(from).catch(retry(attempts + 1))
+          reqStack.push(async () =>
+            fetchAndSaveBlock(provider, chainId, +from, result)
+              .then(() => {
+                // resolves to true when we get the block
+                return true;
+              })
+              .catch(retry(attempts + 1))
           );
         };
       })(1) // start attempts at 1

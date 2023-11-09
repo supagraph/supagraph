@@ -1,5 +1,10 @@
 // Get the global engine for config
 import { getEngine } from "@/sync/tooling/persistence/store";
+import {
+  TransactionReceipt,
+  TransactionResponse,
+  Block,
+} from "@ethersproject/abstract-provider";
 
 // Construct a global promiseQueue to be delayed until later (but still complete as part of this sync)
 export const promiseQueue: (
@@ -23,7 +28,8 @@ export const processPromiseQueue = async (
     | ((stack: (() => Promise<any>)[]) => Promise<unknown>)
   )[],
   concurrency?: number,
-  cleanup?: boolean
+  cleanup: boolean = false,
+  maxRetries: number = 6
 ) => {
   // access global engine for config
   const engine = await getEngine();
@@ -51,13 +57,14 @@ export const processPromiseQueue = async (
           // failure processing promiseQueue item
           console.log(e);
           // if theres an error - restack upto 10 times before throwing in outer context
-          if (attempts < 6) {
+          if (maxRetries === -1 && attempts <= maxRetries) {
             // print the error
             if (!engine.flags.silent) console.log(e);
             // wait a random timeout before attempting again (between 1 and 5 seconds)
             await new Promise((resolveWait) => {
               setTimeout(
                 resolveWait,
+                // wait anywhere from 1 to 5 seconds
                 Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
               );
             });
@@ -85,6 +92,7 @@ export const processPromiseQueue = async (
               let i = 0;
               // we can't take less than one item from the stack
               i < (concurrency || engine.concurrency || 1) &&
+              // and we should stop once we've taken them all
               reqStack.length > 0;
               // incr index to position for loop
               i += 1
@@ -110,4 +118,59 @@ export const processPromiseQueue = async (
         })
     );
   });
+};
+
+// Process the global promiseQueue and run through withPromises before clearing
+export const processGlobalPromiseQueue = async (promiseQueueLength = 0) => {
+  // access global engine for config
+  const engine = await getEngine();
+
+  // allow the promise queue to be aborted
+  let aborted = false;
+
+  // attempt to flush the promiseQueue and resolve any withPromise callbacks
+  try {
+    // create a checkpoint
+    engine.stage.checkpoint();
+    // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
+    await processPromiseQueue(engine.promiseQueue || []);
+
+    // iterate on the syncs and call withPromises
+    for (const group of Object.keys(engine.handlers)) {
+      for (const eventName of Object.keys(engine.handlers[group])) {
+        if (eventName === "withPromises") {
+          // check if we have any postProcessing callbacks to handle (each is handled the same way and is supplied the full promiseQueue)
+          await engine.handlers[group][eventName](
+            engine.promiseQueue,
+            {} as unknown as {
+              tx: TransactionReceipt & TransactionResponse;
+              block: Block;
+              logIndex: number;
+            }
+          );
+        }
+      }
+    }
+
+    // clear the promiseQueue for next iteration
+    engine.promiseQueue.length = 0;
+  } catch (e) {
+    // mark as aborted
+    aborted = true;
+    // revert the checkpoint
+    engine.stage.revert();
+    // clear new items from the queue
+    if (engine.promiseQueue.length > promiseQueueLength) {
+      // restore the prev queue length
+      engine.promiseQueue.length = promiseQueueLength;
+    }
+    // print any errors from processing the promise queue section
+    if (!engine.flags.silent) console.log(e);
+  } finally {
+    // check that we didnt throw before committing this checkpoint
+    if (!aborted) {
+      // commit the checkpoint
+      await engine.stage.commit();
+    }
+  }
 };

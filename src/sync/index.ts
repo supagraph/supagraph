@@ -41,8 +41,10 @@ export {
 } from "@/sync/tooling/network/multicall";
 
 // Export block and receipt getters
-export { getBlockByNumber } from "@/sync/tooling/network/blocks";
-export { getTransactionReceipt } from "@/sync/tooling/network/transactions";
+export {
+  getBlockByNumber,
+  getTransactionReceipt,
+} from "@/sync/tooling/network/fetch";
 
 // Export generic fetch utility to call RPC methods directly
 export { fetchDataWithRetries } from "@/sync/tooling/network/fetch";
@@ -249,6 +251,7 @@ export const sync = async ({
     if (listen) {
       // create an ingestor to start buffering blocks+receipts as they are emitted
       ingestor = await createIngestor(
+        config,
         // control how many reqs we make concurrently
         config ? config.numBlockWorkers ?? numBlockWorkers : numBlockWorkers,
         config

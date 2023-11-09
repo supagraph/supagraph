@@ -303,6 +303,11 @@ export const doCleanup = async (events: SyncEvent[]) => {
       events.map(async (event) => {
         // make sure we've correctly discovered an iface
         if (typeof event.data === "object" && event.data.address) {
+          // delete tx responses from tmp storage
+          await deleteJSON(
+            "transactionResponses",
+            `${event.chainId}-${event.data.transactionHash}`
+          );
           // delete tx from tmp storage
           await deleteJSON(
             "transactions",
@@ -322,6 +327,11 @@ export const doCleanup = async (events: SyncEvent[]) => {
             `${event.chainId}-${parseInt(`${event.data}`).toString(10)}`
           );
         } else if (event.type === "onTransaction") {
+          // delete tx responses from tmp storage
+          await deleteJSON(
+            "transactionResponses",
+            `${event.chainId}-${event.data}`
+          );
           // delete tx from tmp storage
           await deleteJSON("transactions", `${event.chainId}-${event.data}`);
           // delete block from tmp storage
@@ -331,9 +341,9 @@ export const doCleanup = async (events: SyncEvent[]) => {
           );
         }
       })
-    ).catch(() => {
+    ).catch(async () => {
       // attempt the cleanup again - if everything is clean we should return true from deleteJSON
-      doCleanup(events);
+      await doCleanup(events);
     });
   }
 

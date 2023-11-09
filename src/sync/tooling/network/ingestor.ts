@@ -6,7 +6,7 @@ import { getEngine } from "@/sync/tooling/persistence/store";
 import { getNetworks } from "@/sync/tooling/network/providers";
 
 // Supagraph typings
-import { Migration, Sync } from "@/sync/types";
+import { Migration, Sync, SyncConfig } from "@/sync/types";
 
 // Utility to print heap dumps when node is started with --expose-gc
 import { withHeapDump } from "@/utils/withHeapDump";
@@ -717,6 +717,7 @@ export class Ingestor {
 
 // Construct an ingestor to process blocks as they arrive
 export async function createIngestor(
+  config: SyncConfig,
   numBlockWorkers: number,
   numTransactionWorkers: number,
   printIngestorErrors: boolean,
@@ -761,21 +762,14 @@ export async function createIngestor(
         try {
           // attempt to process the block
           await processListenerBlock(
+            // supply the config (incase we adjust providers mid sync)
+            config,
             // blockNumber being processed...
             +block.number,
             // the chainId it belongs to...
             +block.chainId,
-            // process validOps [for this chain] each tick to associate any new syncs (cache and invalidate?)
-            await getValidSyncOps(),
-            // pass through the config...
-            engine.flags.collectBlocks,
-            engine.flags.collectTxReceipts,
-            engine.flags.silent,
             // pass through the length of the queue for reporting and for deciding if we should be saving or not
             ingestor.blockQueueLength,
-            // helper parts to pass through entities, block & receipts...
-            engine.indexedMigrations,
-            engine.indexedMigrationEntities, // <-- TODO: reimplement this.
             // pass in the block and receipt data
             {
               // this is the full block with TransactionResponses
@@ -788,7 +782,13 @@ export async function createIngestor(
                 // return all indexed receipts
                 return receipts;
               }, {}),
-            }
+            },
+            // process indexedOps [by chain] each tick to associate any new syncs (cache and invalidate?)
+            await getIndexedSyncOps(),
+            // pass through the config flags...
+            engine.flags.collectBlocks,
+            engine.flags.collectTxReceipts,
+            engine.flags.silent
           );
         } catch (e) {
           // reject on the handler (this will close the connection)
@@ -905,9 +905,6 @@ async function attachListeners(
     // return the index
     return index;
   }, {} as Record<string, Migration[]>);
-
-  // store all in sparse array (as obj)
-  engine.indexedMigrationEntities = engine.indexedMigrationEntities || {};
 
   // attach a single listener for each provider
   const listeners = await Promise.all(
@@ -1045,7 +1042,7 @@ async function exit(
 }
 
 // Restructure ops into ops by chainId (we provide this new every time we process a block to register any newly added syncs from the prev block we processed)
-async function getValidSyncOps() {
+async function getIndexedSyncOps() {
   // get the engine
   const engine = await getEngine();
   // get all chainIds for defined networks

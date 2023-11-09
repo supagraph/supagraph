@@ -6,7 +6,7 @@ import { TypedMapEntry } from "@/sync/tooling/persistence/typedMapEntry";
 import { getEngine, Store, Entity } from "@/sync/tooling/persistence/store";
 
 // Import network block handler to retrieve migration blocks to set against entities
-import { getBlockByNumber } from "@/sync/tooling/network/blocks";
+import { getBlockByNumber } from "@/sync/tooling/network/fetch";
 
 // Import required Migration and config types
 import {
@@ -16,13 +16,22 @@ import {
   SyncStage,
   SyncEvent,
 } from "@/sync/types";
-import { Block } from "@ethersproject/abstract-provider";
+import {
+  Block,
+  TransactionReceipt,
+  TransactionResponse,
+} from "@ethersproject/abstract-provider";
 
 // apply any migrations that fit in the event range
 export const applyMigrations = async (
   migrations: Migration[],
-  config: SyncConfig,
-  events: SyncEvent[]
+  config: SyncConfig = {
+    name: "supagraph",
+    providers: {},
+    events: {},
+    contracts: {},
+  },
+  events: SyncEvent[] = []
 ) => {
   // retrieve the engine
   const engine = await getEngine();
@@ -109,6 +118,11 @@ export const applyMigrations = async (
               number: migration.blockNumber as number,
               blockNumber: migration.blockNumber as number,
               migrationKey: migration.migrationKey,
+              args: [],
+              tx: {} as TransactionReceipt & TransactionResponse,
+              // onMigration first
+              txIndex: -2,
+              logIndex: -2,
               collectBlock: true,
               collectTxReceipt: false,
             });
@@ -129,11 +143,18 @@ export const applyMigrations = async (
             migrationKey: migration.migrationKey,
             collectBlock: true,
             collectTxReceipt: false,
+            args: [],
+            tx: {} as TransactionReceipt & TransactionResponse,
+            // onMigration first
+            txIndex: -2,
+            logIndex: -2,
           });
           // incr by one
           migrationCount += 1;
         }
       }
+      // clean up migrations after adding events (we can only use a migration once as it is associated with a blockNumber)
+      delete migrations[migrationKey];
     }
     // if we're starting the process here then print the discovery
     if (

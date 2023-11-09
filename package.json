@@ -1,6 +1,6 @@
 {
   "name": "supagraph",
-  "version": "0.0.1-rc.67",
+  "version": "0.0.1-rc.68",
   "author": "grezle",
   "license": "MIT",
   "description": "Open-source toolkit for building efficient cross-chain indexes from onchain data",

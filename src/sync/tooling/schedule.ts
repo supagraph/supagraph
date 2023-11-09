@@ -1,18 +1,11 @@
 // import cronParser to check when the last event should have been constructed for a block
 import cronParser from "cron-parser";
 
-// import ethers typings for block/receipt/response
-import {
-  Block,
-  TransactionReceipt,
-  TransactionResponse,
-} from "@ethersproject/abstract-provider";
-
 // get the engine and updateSyncsOpsMeta incase scheduled events modifies sync operations
 import { getEngine, updateSyncsOpsMeta } from "./persistence";
 
 // scheduled events might use the promise queue to process data (unlikely and unnecessary)
-import { processPromiseQueue } from "./promises";
+import { processGlobalPromiseQueue } from "./promises";
 
 // check the blockTimestamp against the schedule
 export const checkSchedule = async (blockTimestamp: number) => {
@@ -69,51 +62,8 @@ export const checkSchedule = async (blockTimestamp: number) => {
             console.error(e);
           }
 
-          // allow the promise queue to be aborted
-          let aborted = false;
-          // attempt to flush the promiseQueue and resolve any withPromise callbacks
-          try {
-            // create a checkpoint
-            engine.stage.checkpoint();
-            // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
-            await processPromiseQueue(engine.promiseQueue || []);
-            // iterate on the syncs and call withPromises
-            for (const group of Object.keys(engine.handlers)) {
-              for (const eventName of Object.keys(engine.handlers[group])) {
-                if (eventName === "withPromises") {
-                  // check if we have any postProcessing callbacks to handle
-                  await engine.handlers[group][eventName](
-                    engine.promiseQueue,
-                    {} as unknown as {
-                      tx: TransactionReceipt & TransactionResponse;
-                      block: Block;
-                      logIndex: number;
-                    }
-                  );
-                }
-              }
-            }
-            // clear the promiseQueue for next iteration
-            engine.promiseQueue.length = 0;
-          } catch (e) {
-            // mark as aborted
-            aborted = true;
-            // revert the checkpoint
-            engine.stage.revert();
-            // clear new items from the queue
-            if (engine.promiseQueue.length > promiseQueueLength) {
-              // restore the prev queue length
-              engine.promiseQueue.length = promiseQueueLength;
-            }
-            // print any errors from processing the promise queue section
-            if (!engine.flags.silent) console.log(e);
-          } finally {
-            // check that we didnt throw before committing this checkpoint
-            if (!aborted) {
-              // commit the checkpoint
-              await engine.stage.commit();
-            }
-          }
+          // await all promises that have been enqueued during execution of callbacks (this will be cleared afterwards ready for the next run)
+          await processGlobalPromiseQueue(promiseQueueLength);
 
           // mark after we end the processing
           if (!engine.flags.silent) {

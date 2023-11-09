@@ -1,5 +1,4 @@
 import {
-  Block,
   JsonRpcProvider,
   TransactionReceipt,
   WebSocketProvider,
@@ -15,12 +14,22 @@ import { processPromiseQueue } from "@/sync/tooling/promises";
 import { createBlockRanges, getNewBlocks } from "@/sync/tooling/network/blocks";
 import {
   exists,
+  readJSON,
   readLatestRunCapture,
+  saveJSON,
   saveLatestRunCapture,
 } from "@/sync/tooling/persistence/disk";
 import { Sync, SyncStage, SyncEvent } from "@/sync/types";
+import {
+  BlockWithTransactions,
+  TransactionResponse,
+} from "@ethersproject/abstract-provider";
 import { getAddress } from "ethers/lib/utils";
-import { getFnResultForProp } from "./fetch";
+import {
+  getBlockByNumber,
+  getFnResultForProp,
+  getTransactionReceipt,
+} from "./fetch";
 import { getNetworks } from "./providers";
 import { getNewTransactions } from "./transactions";
 
@@ -500,14 +509,45 @@ export const getNewSyncEventsBlocks = async (
     const filtered = events.filter((evt) => !!evt.collectBlock);
 
     // extract blocks and call getBlock once for each discovered block - then index against blocks number
-    await getFnResultForProp<Block>(
+    await getFnResultForProp<BlockWithTransactions>(
       events,
       filtered,
-      syncProviders,
       "blocks",
       "blockNumber",
-      "getBlock",
-      "timestamp",
+      // pull the block and transaction (responses) from network
+      (dets) => getBlockByNumber(syncProviders[dets.chainId], dets.blockNumber),
+      // pull block from disk
+      (dets) => readJSON("blocks", `${dets.chainId}-${+dets.blockNumber}`),
+      // save the result from network
+      async (dets, resData) => {
+        // write the file
+        await saveJSON(
+          "blocks",
+          `${dets.chainId}-${+dets.blockNumber}`,
+          resData as unknown as Record<string, unknown>
+        );
+
+        // save all the transactions as transactionResponses
+        await Promise.all(
+          resData.transactions.map(async (tx) => {
+            // write the file
+            await saveJSON(
+              "transactionResponses",
+              `${dets.chainId}-${tx.hash}`,
+              tx as unknown as Record<string, unknown>
+            );
+          })
+        );
+
+        // record blockNum and timestamp into dets
+        dets.timestamp = +resData.timestamp;
+        dets.blockNumber = +resData.number;
+      },
+      (dets) => {
+        // rehydrate timestamp and blockNum as number
+        dets.timestamp = +dets.timestamp;
+        dets.blockNumber = +dets.blockNumber;
+      },
       silent
     );
   }
@@ -534,11 +574,49 @@ export const getNewSyncEventsTxReceipts = async (
     await getFnResultForProp<TransactionReceipt>(
       events,
       filtered,
-      syncProviders,
       "transactions",
       "transactionHash",
-      "getTransactionReceipt",
-      "from",
+      // pull the receipts from network
+      async (dets) => {
+        // we can supply getTransactionReceipt with a txResponse or a txHash...
+        let tx: TransactionResponse | string;
+        // attempt to read the transactionResponse from disk first (we might have collected in a block already)
+        try {
+          // if we've fetched the block then we've saved the response
+          tx = await readJSON<TransactionResponse>(
+            "transactionResponses",
+            `${dets.chainId}-${dets.data as string}`
+          );
+        } catch {
+          // if we havent then collect from the txHash
+          tx = dets.data as string;
+        }
+
+        // return the receipt
+        return getTransactionReceipt(syncProviders[dets.chainId], tx);
+      },
+      // pull receipts from disk
+      (dets) =>
+        readJSON(
+          "transactions",
+          `${dets.chainId}-${
+            typeof dets.data === "object"
+              ? dets.data.transactionHash
+              : dets.data
+          }`
+        ),
+      // save the result from network
+      async (dets, resData) => {
+        // write the file
+        await saveJSON(
+          "transactions",
+          `${dets.chainId}-${resData.transactionHash}`,
+          resData as unknown as Record<string, unknown>
+        );
+        // record from into dets
+        dets.from = resData.from as string;
+      },
+      () => {},
       silent
     );
   }
@@ -578,6 +656,8 @@ export const getNewSyncEventsSorted = async (
       const logSort =
         (a.logIndex || toEventData(a.data).logIndex || 0) -
         (b.logIndex || toEventData(b.data).logIndex || 0);
+      // finally sort migrations according to their migrationKey
+      const migSort = (a.migrationKey || 0) - (b.migrationKey || 0);
 
       // bail outs to move tx/block handler calls to the top
       if (!blockSort && !txSort && typeof a.data === "string") {
@@ -588,7 +668,13 @@ export const getNewSyncEventsSorted = async (
       }
 
       // if blockNumbers match sort on txIndex then logIndex
-      return blockSort !== 0 ? blockSort : txSort !== 0 ? txSort : logSort;
+      return blockSort !== 0
+        ? blockSort
+        : txSort !== 0
+        ? txSort
+        : logSort !== 0
+        ? logSort
+        : migSort;
     });
 
     // don't save if we're just going to delete it...

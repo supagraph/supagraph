@@ -1,17 +1,18 @@
-import { Event, ethers } from "ethers";
-import { Block, TransactionReceipt } from "@ethersproject/abstract-provider";
+import { ethers } from "ethers";
+import {
+  Block,
+  BlockWithTransactions,
+  TransactionReceipt,
+  TransactionResponse,
+} from "@ethersproject/abstract-provider";
 import { JsonRpcProvider, WebSocketProvider } from "@ethersproject/providers";
 
-import { SyncEvent } from "@/sync/types";
-
 import { getEngine } from "@/sync/tooling/persistence/store";
-import { readJSON, saveJSON } from "@/sync/tooling/persistence/disk";
-import { getRandomProvider } from "@/sync/tooling/network/providers";
-
+import { withRetries } from "@/utils/withRetries";
 import { processPromiseQueue } from "@/sync/tooling/promises";
 
-import { getBlockByNumber } from "@/sync/tooling/network/blocks";
-import { getTransactionReceipt } from "@/sync/tooling/network/transactions";
+// All events fit into the SyncEvent type
+import { SyncEvent } from "@/sync/types";
 
 // Constants used in post requests
 const method = "POST";
@@ -19,97 +20,52 @@ const headers = {
   "Content-Type": "application/json",
 };
 
-// this is only managing about 20k blocks before infura gets complainee
+// Call the fn and save the details
 export const attemptFnCall = async <T extends Record<string, any>>(
-  syncProviders: Record<number, JsonRpcProvider | WebSocketProvider>,
-  type: string,
-  dets: {
-    type: string;
-    data: Event | string | number;
-    chainId: number;
-    blockNumber: number;
-    timestamp?: number;
-    from?: string;
-  },
-  prop: keyof ethers.Event,
-  fn: "getBlock" | "getTransactionReceipt",
-  resProp: "timestamp" | "from",
-  attempts: number
+  dets: SyncEvent,
+  fnCall: (dets: SyncEvent) => Promise<T>,
+  saveDets: (dets: SyncEvent, res: T) => Promise<void> | void
 ) => {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error("Query timeout exceeded::attemptFnCall"));
     }, 120000);
 
-    // select provider to use for call
-    const provider =
-      attempts === 0
-        ? syncProviders[dets.chainId]
-        : getRandomProvider(dets.chainId, [
-            syncProviders[dets.chainId].connection.url,
-          ]);
-
-    // wrap call to get block/receipt from custom handler
-    const call: (hash: unknown) => Promise<T> =
-      fn === "getTransactionReceipt"
-        ? // direct through getTransactionReceipt
-          async (hash: unknown) =>
-            getTransactionReceipt(
-              provider,
-              hash as string
-            ) as unknown as Promise<T>
-        : fn === "getBlock"
-        ? // direct through getBlockByNumber
-          async (num: unknown) =>
-            getBlockByNumber(provider, num as number) as unknown as Promise<T>
-        : // noop (unreachable)
-          async () => undefined;
-
     // attempt to get the block from the connected provider first
-    call(dets.data[prop])
+    fnCall(dets)
       .then(async (resData: T) => {
         // if we have data...
-        if (resData && resData[resProp]) {
+        if (resData) {
+          // clear timeout to kill rejection
           clearTimeout(timer);
-          // write the file
-          await saveJSON(
-            type,
-            `${dets.chainId}-${
-              type === "blocks"
-                ? parseInt(`${dets.blockNumber}`).toString(10)
-                : dets.data[prop]
-            }`,
-            resData
-          );
           // spread the val
-          if (resProp === "from") {
-            dets.from = resData.from as string;
-          } else {
-            // set the value by mutation
-            dets.timestamp = resData.timestamp as number;
-          }
+          await saveDets(dets, resData);
           // resolve the requested data
           resolve(resData);
         } else {
+          // throw to trigger a retry attempt (in parent context)
           throw new Error("Missing data");
         }
       })
       .catch((e) => {
+        // clear timeout to kill hanging resource
         clearTimeout(timer);
+        // reject with error
         reject(e);
       });
   });
 };
 
-// unpack event fn details for prop
+// Unpack event fn details for prop using provided fns to process the operations
 export const getFnResultForProp = async <T extends Record<string, any>>(
   events: SyncEvent[],
   filtered: SyncEvent[],
-  syncProviders: Record<number, JsonRpcProvider | WebSocketProvider>,
   type: string,
   prop: keyof ethers.Event,
-  fn: "getBlock" | "getTransactionReceipt",
-  resProp: "timestamp" | "from",
+  fnCall: (dets: SyncEvent) => Promise<T>,
+  readDets: (dets: SyncEvent) => Promise<T>,
+  saveDets: (dets: SyncEvent, res: T) => Promise<void> | void,
+  cleanDets: (dets: SyncEvent) => Promise<void> | void,
   silent?: boolean
 ) => {
   // fetch the engine for config
@@ -121,18 +77,18 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
   // attempt the fn call against the dets (this will always result in an eventual call to processed)
   const makeFnCall = (
     dets: SyncEvent,
-    attempts: number,
     resolve: (v: unknown) => void,
     reject: (e: any) => void
   ) =>
     // attempt the appropriate fn call and resolve/catch any errors
-    attemptFnCall<T>(syncProviders, type, dets, prop, fn, resProp, attempts)
-      .then((respType) => {
+    attemptFnCall<T>(dets, fnCall, saveDets)
+      .then((respType: T) => {
         resolve(respType);
       })
       .catch((errType) => {
         reject(errType);
       });
+
   // once fetched place results hash into the results
   const processed = (val: Block | TransactionReceipt) => {
     // count successfully fetched items
@@ -150,38 +106,28 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
     stack.push(async (reqStack) => {
       await new Promise<unknown>((resolve, reject) => {
         // first attempt to read the content from disk
-        readJSON(
-          type,
-          `${dets.chainId}-${
-            // when dealing with blocks we need to ensure the blockNumber is base 10
-            type === "blocks"
-              ? +dets.blockNumber
-              : typeof dets.data === "object"
-              ? dets.data[prop]
-              : dets.data
-          }`
-        )
-          .then((data) => {
+        readDets(dets)
+          .then(async (data) => {
             if (data) {
-              // store the requested resProp against the instance
-              dets[resProp as string] = data[
-                resProp as string
-              ] as (typeof dets)[typeof resProp];
+              // save the result into dets
+              await saveDets(dets, data);
               // convert timestamp to base 10 number
-              if (resProp === "timestamp")
-                dets[resProp as string] = +dets[resProp as string];
+              await cleanDets(dets);
               // resolve the discovered data
               resolve(data);
             } else {
               // make the fn call to get the block/transaction
-              throw new Error("Missing block data fetch new...");
+              throw new Error("Missing data fetch new...");
             }
           })
           .catch(() => {
             // if anything failed during read, attempt the fn call for the first time (attempts: 0)
-            makeFnCall(dets, 0, resolve, reject);
+            return makeFnCall(dets, resolve, reject);
           });
       })
+        // finalise first attempt with processed (later attempts are piped through processed() on resolve())
+        .then(processed)
+        // if any part of the first attempt failed then try again...
         .catch(
           // set up a routine to catch and retry recursively - we always want to eventually resolve these
           (function retry(attempts) {
@@ -199,13 +145,11 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
               // push another task to the reqStack (and resolve current task)
               reqStack.push(() =>
                 // make the fnCall again and incr the attempts
-                makeFnCall(dets, attempts, processed, retry(attempts + 1))
+                makeFnCall(dets, processed, retry(attempts + 1))
               );
             };
           })(1)
-        )
-        // finalise first attempt with processed (later attempts are piped through processed() on resolve())
-        .then(processed);
+        );
     });
   }
 
@@ -218,19 +162,19 @@ export const getFnResultForProp = async <T extends Record<string, any>>(
 };
 
 // Method to fetch data via a given rpc url
-export async function fetchDataWithRetries<T>(
+export const fetchDataWithRetries = async <T>(
   url: string,
   rpcMethod: string,
   rpcParams: unknown[],
   maxRetries: number = 3,
   silent: boolean = true
-) {
+) => {
   // keep response outside so we can cancel the req in finally
   let response: Response;
 
-  // attempt to fetch the block data
-  for (let retry = 1; retry <= maxRetries; retry += 1) {
-    try {
+  // attempt to fetch the block data with retries
+  return withRetries<T>(
+    async () => {
       // set an abort controller to timeout the request
       const controller = new AbortController();
 
@@ -258,24 +202,146 @@ export async function fetchDataWithRetries<T>(
 
       // return the result
       if (data.result) return data.result as T;
-    } catch (error) {
+
+      // throw to retry/end
+      throw new Error("No response");
+    },
+    (error, retries) => {
       // if theres an error we'll try again upto maxRetries
       if (!silent)
-        console.error(`Error fetching ${rpcMethod} (retry ${retry}):`, error);
-      // lets wait a second after a failed fetch before attempting it again
-      await new Promise((resolve) => {
-        setTimeout(
-          resolve,
-          // try again in anywhere from 1 to 5 seconds
-          Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
-        );
-      });
-    } finally {
+        console.error(`Error fetching ${rpcMethod} (retry ${retries}):`, error);
+    },
+    () => {
       // finally, if we returned or errored, we need to cancel the body to close the resource
       if (response && !response.bodyUsed) response.body.cancel();
-    }
+    },
+    // number of retry attemps
+    maxRetries,
+    // dynamically set how long to wait between attempts for random wait time each call
+    () => Math.floor((Math.random() * (5 - 1) + 1) * 1e3)
+  );
+};
+
+// Get a block and all transaction responses with retries
+export const getBlockByNumber = async (
+  provider: JsonRpcProvider | WebSocketProvider,
+  blockNumber: number | "latest",
+  useProvider: boolean = false,
+  maxRetries: number = 3,
+  retryDelay: number = 1e3
+): Promise<BlockWithTransactions> => {
+  // get the block tag as hex or latest
+  const blockTag =
+    blockNumber === "latest" ? "latest" : `0x${blockNumber.toString(16)}`;
+
+  // if we're using the provider
+  if (useProvider) {
+    return withRetries<BlockWithTransactions>(
+      async () => {
+        // fetch block by hex number passing true to fetch all transaction responses
+        const block = await provider.send("eth_getBlockByNumber", [
+          blockTag,
+          true,
+        ]);
+
+        // check the block holds data and return if valid
+        if (block?.number && +block.number === +blockNumber) return block;
+
+        // throw error and retry
+        throw new Error("No block response");
+      },
+      undefined,
+      undefined,
+      maxRetries,
+      retryDelay
+    );
   }
 
-  // if we fail to return the result then we should restack the task
-  return null;
-}
+  // otherwise pass through to fetchWithRetries
+  const block = await fetchDataWithRetries<BlockWithTransactions>(
+    provider.connection.url,
+    "eth_getBlockByNumber",
+    [blockTag, true],
+    maxRetries,
+    true
+  );
+
+  // check the block holds data
+  if (block?.number && +block.number === +blockNumber) {
+    // return discovered block response
+    return block;
+  }
+
+  // throw error if we didn't get the block data
+  throw new Error("No block response");
+};
+
+// get a full transaction receipt from hash
+export const getTransactionReceipt = async (
+  provider: JsonRpcProvider | WebSocketProvider,
+  txHash: string | TransactionResponse,
+  useProvider: boolean = false,
+  maxRetries: number = 3,
+  retryDelay: number = 1e3
+): Promise<TransactionReceipt & TransactionResponse> => {
+  // if we're using the provider
+  if (useProvider) {
+    return withRetries<TransactionReceipt & TransactionResponse>(
+      async () => {
+        // get the txResponse if we dont already have it
+        const tx = (txHash as TransactionResponse)?.hash
+          ? txHash
+          : await provider.send("eth_getTransactionByHash", [txHash]);
+        // get the receipt for the txHash
+        const receipt = await provider.send("eth_getTransactionReceipt", [
+          tx.hash,
+        ]);
+
+        // if we have all components of the tx + receipt
+        if (tx && tx.hash && receipt && receipt.transactionHash)
+          return {
+            ...tx,
+            ...receipt,
+          };
+
+        // throw to retry/end
+        throw new Error("No transaction response");
+      },
+      // no catch or finally...
+      undefined,
+      undefined,
+      // pass through maxRetries options
+      maxRetries,
+      retryDelay
+    );
+  }
+
+  // get the txResponse if we dont already have it
+  const tx = (txHash as TransactionResponse)?.hash
+    ? (txHash as TransactionResponse)
+    : await fetchDataWithRetries<TransactionResponse>(
+        provider.connection.url,
+        "eth_getTransactionByHash",
+        [txHash],
+        maxRetries,
+        true
+      );
+  // get the receipt for the txHash
+  const receipt = await fetchDataWithRetries<TransactionReceipt>(
+    provider.connection.url,
+    "eth_getTransactionReceipt",
+    [tx.hash],
+    maxRetries,
+    true
+  );
+
+  // if we discovered the tx and receipt return them
+  if (tx && tx.hash && receipt && receipt.transactionHash)
+    return {
+      ...tx,
+      ...receipt,
+    };
+
+  // throw to retry/end
+  throw new Error("No transaction response");
+};
