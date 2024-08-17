@@ -38,7 +38,12 @@ export const getRandomProvider = (
   rpcProviders[chainId] = rpcProviders[chainId] || {};
   rpcProviders[chainId][key] =
     rpcProviders[chainId][key] ||
-    new providers.JsonRpcProvider(useProviders[key]);
+    new providers.JsonRpcProvider({
+      fetchOptions: {
+        referrer: "https://supagraph.xyz",
+      },
+      url: useProviders[key],
+    });
   return rpcProviders[chainId][key];
 };
 
@@ -67,7 +72,12 @@ export const replaceMapProviders = async (syncOp: Sync) => {
   // drop all listeners on the current provider
   syncOp.provider.removeAllListeners();
   // construct new syncOp
-  syncOp.provider = new JsonRpcProvider(syncOp.provider.connection.url);
+  syncOp.provider = new JsonRpcProvider({
+    fetchOptions: {
+      referrer: "https://supagraph.xyz",
+    },
+    url: syncOp.provider.connection.url,
+  });
   // if the network is resolved for the provider...
   if (syncOp.provider.network?.chainId) {
     // record the provider for the chain

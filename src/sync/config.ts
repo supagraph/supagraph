@@ -350,7 +350,12 @@ export const setSyncs = async (
       // set the rpc provider if undefined for this chainId
       engine.providers[syncOp.chainId][0] =
         engine.providers[syncOp.chainId][0] ||
-        new providers.JsonRpcProvider(rpcUrl);
+        new providers.JsonRpcProvider({
+          fetchOptions: {
+            referrer: "https://supagraph.xyz",
+          },
+          url: rpcUrl,
+        });
 
       // for each handler register a sync
       await Promise.all(

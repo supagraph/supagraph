@@ -365,9 +365,12 @@ export const restoreSyncOps = async (
             // set the rpc provider if undefined for this chainId
             engine.providers[syncOp.chainId][0] =
               engine.providers[syncOp.chainId][0] ||
-              new providers.JsonRpcProvider(
-                config.providers[syncOp.chainId].rpcUrl
-              );
+              new providers.JsonRpcProvider({
+                fetchOptions: {
+                  referrer: "https://supagraph.xyz",
+                },
+                url: config.providers[syncOp.chainId].rpcUrl,
+              });
             // construct the provider for this chainId
             const provider = (await getProvider(
               syncOp.chainId

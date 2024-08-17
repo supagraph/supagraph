@@ -54,9 +54,13 @@ export const applyMigrations = async (
               engine.providers[migration.chainId] || [];
             engine.providers[migration.chainId][0] =
               engine.providers[migration.chainId][0] ||
-              new providers.JsonRpcProvider(
-                config.providers[migration.chainId].rpcUrl
-              );
+              new providers.JsonRpcProvider({
+                fetchOptions: {
+                  referrer: "https://supagraph.xyz",
+                },
+                url: config.providers[migration.chainId].rpcUrl,
+              });
+
             // fetch the meta entity from the store (we'll update this once we've committed all changes)
             engine.latestEntity[migration.chainId] = await Store.get(
               "__meta__",
